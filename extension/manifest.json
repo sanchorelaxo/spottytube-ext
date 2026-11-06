@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "SpottyTube",
+  "version": "1.0.0",
+  "description": "Send a YouTube time range to a Spotykach deck through the local spottytube bridge.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1:8765/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "SpottyTube controls live on the YouTube page"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/watch*",
+        "*://*.youtube.com/shorts/*",
+        "*://*.youtube.com/live/*"
+      ],
+      "js": ["selection.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
