@@ -1,5 +1,8 @@
 # SpottyTube
 
+> Users are responsible for their content and for complying with platform
+> terms and copyright law!
+
 ![SpottyTube panel on a YouTube video](spotty_screen.png)
 
 A browser extension (Chrome / Brave, Manifest V3) that puts a small panel on a
@@ -172,3 +175,8 @@ skipped instead of aborting the card scan.
     extension/content.js           the widget (shadow DOM, no page CSS leaks)
     extension/selection.js         start/end state machine (tested in node)
     tests/                         bridge, tool, dependency and state-machine tests
+
+## Licence
+
+Public domain, Unlicense. See [LICENCE](LICENCE). This covers the code in this
+repository only; media you sample stays yours to account for.
