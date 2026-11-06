@@ -5,7 +5,7 @@
 (function (global) {
   "use strict";
 
-  var MAX_LOOP = 42; // seconds; mirrors yt_sample.MAX_LOOP_SECONDS
+  var MAX_LOOP = 42; // seconds; mirrors sample_tool.MAX_LOOP_SECONDS
 
   function createPair() {
     var start = null;

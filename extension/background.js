@@ -42,6 +42,7 @@ async function call(path, options = {}) {
 
 const handlers = {
   health: () => call("/health"),
+  status: () => call("/status"),
   card: () => call("/card"),
   sample: (msg) => call("/sample", { method: "POST", body: JSON.stringify(msg.payload) }),
   job: (msg) => call(`/jobs/${encodeURIComponent(msg.job_id)}`)

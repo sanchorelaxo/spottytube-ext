@@ -15,7 +15,8 @@
   const POLL_MS = 1200;
   const POLL_LIMIT_MS = 16 * 60 * 1000;
 
-  const ui = { deck: "a", collapsed: false, left: null, top: null, busy: false, timer: null, online: null };
+  const ui = { deck: "a", collapsed: false, left: null, top: null,
+             busy: false, timer: null, online: null, ready: false, transport: null };
 
   // --- page facts ---------------------------------------------------------
 
@@ -187,7 +188,7 @@
     el.set.textContent = s.complete ? "NEW SELECTION" : (s.start === null ? "SET START" : "SET END");
     el.set.classList.toggle("armed", s.start !== null && !s.complete);
 
-    el.send.disabled = !s.complete || s.overLimit || ui.busy;
+    el.send.disabled = !s.complete || s.overLimit || ui.busy || !ui.ready;
     el.send.textContent = ui.busy ? "Working\u2026" : "Send to deck";
 
     el.decks.forEach((b) => b.classList.toggle("on", b.dataset.deck === ui.deck));
@@ -199,15 +200,35 @@
 
   function showOffline(message) {
     ui.online = false;
+    ui.ready = false;
+    ui.transport = null;
     el.dot.className = "dot off";
     el.dot.title = message || "bridge offline";
     setStatus(message || "bridge not running", "err");
+    render();
   }
 
-  function showOnline() {
+  // The instrument is the thing that can be missing even when the bridge is
+  // fine: no USB cable into a powered Spotykach and no card in a reader leaves
+  // nothing that can take a sample, and the dot goes red instead of pretending
+  // the send button will work.
+  function showNotReady(detail) {
     ui.online = true;
+    ui.ready = false;
+    ui.transport = null;
+    el.dot.className = "dot off";
+    el.dot.title = detail || "no usb device and no card";
+    setStatus(detail || "no instrument — connect usb or insert the card", "err");
+    render();
+  }
+
+  function showOnline(transport) {
+    ui.online = true;
+    ui.ready = true;
+    ui.transport = transport || null;
     el.dot.className = "dot on";
-    el.dot.title = "bridge running";
+    el.dot.title = transport ? `ready over ${transport}` : "bridge running";
+    render();
   }
 
   // --- time selection -----------------------------------------------------
@@ -322,7 +343,7 @@
                   `${Math.round(r.end - r.start)}s\n${r.card_path || r.segment}`, "ok");
         return true;
       }
-      const detail = (job.stderr || job.stdout || "yt_sample.py failed").trim();
+      const detail = (job.stderr || job.stdout || "sampling tool failed").trim();
       setStatus(detail.split("\n").slice(-4).join("\n"), "err");
       return false;
     }
@@ -417,7 +438,7 @@
     pair.reset();
     render();
     setStatus("");
-    refreshCard();
+    refreshStatus();
   }
 
   document.addEventListener("yt-navigate-finish", onNavigate, true);
@@ -431,19 +452,32 @@
     }
   }, 1500);
 
-  async function refreshCard() {
-    const card = await ask({ type: "card" });
-    if (card.offline) {
-      showOffline(card.error);
-      return;
-    }
-    showOnline();
-    if (!card.ok) {
-      const first = (card.text || "card not ready").split("\n").filter(Boolean).slice(-2).join("\n");
-      setStatus(first, "err");
-    } else {
-      const line = (card.text || "").split("\n").find((l) => l.startsWith("card:")) || "card ready";
-      setStatus(line.replace(/^card:\s*/, "card: "), "");
+  // /status answers the one question the widget needs: can anything take a
+  // sample right now, and over which transport. USB is preferred by the bridge;
+  // the card is only reported when USB is not there.
+  let checking = false;
+
+  async function refreshStatus() {
+    if (checking) return;
+    checking = true;
+    try {
+      const status = await ask({ type: "status" });
+      if (status.offline) {
+        showOffline(status.error);
+        return;
+      }
+      if (!status.ok) {
+        showNotReady(status.error || "bridge could not check the instrument");
+        return;
+      }
+      if (!status.ready) {
+        showNotReady(status.error || "no usb device and no card — connect usb or insert the card");
+        return;
+      }
+      showOnline(status.transport);
+      if (!ui.busy && el.status.textContent.startsWith("no instrument")) setStatus("");
+    } finally {
+      checking = false;
     }
   }
 
@@ -463,5 +497,8 @@
   }
 
   render();
-  refreshCard();
+  refreshStatus();
+  // The Spotykach drops out of transfer mode on its own, so re-check even when
+  // the page does nothing; the dot has to go red on its own too.
+  setInterval(refreshStatus, 20000);
 })();
