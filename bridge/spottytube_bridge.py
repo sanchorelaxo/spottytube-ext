@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""SpottyTube local bridge — lets a browser extension run yt_sample.py.
+"""SpottyTube local bridge — lets a browser extension run the sampling tool.
 
 A browser extension cannot start a process. This listens on 127.0.0.1 and turns
-one small JSON request into one yt_sample.py run, so the widget on a YouTube
-page can hand a time range to the Spotykach deck.
+one small JSON request into one ``sample_tool.py`` run, so the widget on a page
+can hand a time range to the Spotykach.
 
     POST /sample   {"url","start","end","deck"}  -> 202 {"job_id"}
     GET  /jobs/<id>                              -> job state, result, output
-    GET  /card                                   -> `yt_sample.py --check-card`
+    GET  /status                                 -> which transports work now
+    GET  /card                                   -> `sample_tool.py --check-card`
     GET  /health                                 -> tool present, card visible
 
-Runs are serialised by one worker thread on purpose: yt-dlp downloads are heavy
-and two concurrent cuts would fight over the same cache and the same SD slot.
+``source`` is a string option, not an assumption: the request may say
+``"source": "youtube"`` to have the URL's video id parsed, but the default is
+generic handling of whatever URL was given. ``transport`` (``auto``/``usb``/
+``card``) and ``tape`` pass through the same way.
+
+Runs are serialised by one worker thread on purpose: downloads are heavy and two
+concurrent cuts would fight over the same cache and the same tape.
 
 Security posture: binds to 127.0.0.1 only, accepts JSON POSTs only, and answers
 CORS preflights only for chrome-extension:// origins (Brave and Chrome both use
@@ -38,20 +44,21 @@ from typing import cast
 VERSION = "1.0.0"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-# The tool ships with the project (tools/yt_sample.py + tools/wav_builder.py),
-# resolved from this file rather than from ~/.local/bin, so the checkout is
-# self-contained. --tool / SPOTTYTUBE_TOOL still override it.
+# The tool ships with the project (tools/sample_tool.py + tools/wav_builder.py
+# + tools/sk_usb.py + tools/sk_install.py), resolved from this file rather than
+# from ~/.local/bin, so the checkout is self-contained. --tool / SPOTTYTUBE_TOOL
+# still override it.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TOOL = PROJECT_ROOT / "tools" / "yt_sample.py"
+DEFAULT_TOOL = PROJECT_ROOT / "tools" / "sample_tool.py"
 
-# Mirrors yt_sample.MAX_LOOP_SECONDS. Checked here so an impossible range costs
-# a 400 instead of a download.
+# Mirrors sample_tool.MAX_LOOP_SECONDS. Checked here so an impossible range
+# costs a 400 instead of a download.
 MAX_LOOP_SECONDS = 42.0
 JOB_TIMEOUT_SECONDS = 900
 MAX_BODY_BYTES = 64 * 1024
 
 
-# --- time helpers (mirror of yt_sample.parse_time) ------------------------
+# --- time helpers (mirror of sample_tool.parse_time) ------------------------
 
 
 def parse_time(value):
@@ -111,7 +118,7 @@ def visible_card(mounts_path="/proc/mounts"):
 
 
 def extract_json(stdout):
-    """Pull the result object out of yt_sample.py --json output.
+    """Pull the result object out of the tool's --json output.
 
     The CLI prints a human line ("card: ... (ready)") before the JSON, so the
     payload starts at the first brace.
@@ -186,9 +193,9 @@ class JobStore:
                 stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
             except subprocess.TimeoutExpired:
                 stdout, stderr, code = "", (
-                    f"yt_sample.py timed out after {self.timeout}s"), 124
+                    f"sampling tool timed out after {self.timeout}s"), 124
             except OSError as error:
-                stdout, stderr, code = "", f"could not start yt_sample.py: {error}", 127
+                stdout, stderr, code = "", f"could not start the sampling tool: {error}", 127
 
             result = extract_json(stdout)
             ok = code == 0 and result is not None
@@ -222,11 +229,18 @@ def _validate(body):
     start = str(body.get("start", "")).strip()
     end = str(body.get("end", "")).strip()
     deck = str(body.get("deck", "")).strip().lower()
+    # Optional pass-throughs. `source` stays a plain string so the bridge never
+    # hardcodes a provider; the tool decides what it means and rejects unknowns.
+    source = str(body.get("source", "") or "").strip().lower() or None
+    transport = str(body.get("transport", "") or "").strip().lower() or None
+    tape = str(body.get("tape", "") or "").strip().upper() or None
 
     if not url.startswith(("http://", "https://")):
         return None, "url must be an http(s) URL"
     if deck not in ("a", "b"):
         return None, "deck must be 'a' or 'b'"
+    if transport is not None and transport not in ("auto", "usb", "card"):
+        return None, "transport must be 'auto', 'usb' or 'card'"
     for name, value in (("start", start), ("end", end)):
         if not value:
             return None, f"{name} is required"
@@ -241,7 +255,10 @@ def _validate(body):
         return None, (f"segment is {end_s - start_s:g}s; a deck holds "
                       f"{MAX_LOOP_SECONDS:g}s max")
 
-    return {"url": url, "start": start, "end": end, "deck": deck}, None
+    return {
+        "url": url, "start": start, "end": end, "deck": deck,
+        "source": source, "transport": transport, "tape": tape,
+    }, None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -325,6 +342,28 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if path == "/status":
+            # One call for the widget's health colour: the tool reports whether
+            # USB or the card can take a sample right now.
+            argv = [self.bridge.store.python, str(self.bridge.store.tool),
+                    "--status", "--json"]
+            try:
+                proc = subprocess.run(argv, capture_output=True, text=True, timeout=25)
+                report = extract_json(proc.stdout) or {}
+                self._send(200, {
+                    "ok": True,
+                    "ready": bool(report.get("ready")),
+                    "transport": report.get("transport"),
+                    "usb": report.get("usb", {}),
+                    "card": report.get("card", {}),
+                    "card_visible": visible_card(),
+                    "stderr": proc.stderr.strip()[-500:],
+                })
+            except (OSError, subprocess.SubprocessError) as error:
+                self._send(200, {"ok": False, "ready": False, "transport": None,
+                                 "error": str(error), "card_visible": visible_card()})
+            return
+
         if path == "/card":
             argv = [self.bridge.store.python, str(self.bridge.store.tool), "--check-card"]
             try:
@@ -363,14 +402,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         payload, error = _validate(body)
-        if error:
-            self._send(400, {"ok": False, "error": error})
+        if error or payload is None:
+            self._send(400, {"ok": False, "error": error or "invalid request"})
             return
 
         store = self.bridge.store
         if not store.tool.is_file():
             self._send(500, {"ok": False,
-                             "error": f"yt_sample.py not found at {store.tool}"})
+                             "error": f"sampling tool not found at {store.tool}"})
             return
 
         argv = [store.python, str(store.tool),
@@ -379,6 +418,11 @@ class Handler(BaseHTTPRequestHandler):
                 "--end", payload["end"],
                 "--deck", payload["deck"],
                 "--json"]
+        for flag, key in (("--source", "source"),
+                          ("--transport", "transport"),
+                          ("--tape", "tape")):
+            if payload.get(key):
+                argv += [flag, payload[key]]
         job_id = store.submit(argv, payload)
         self._send(202, {"ok": True, "job_id": job_id, "meta": payload})
 
@@ -405,7 +449,7 @@ def make_server(host=DEFAULT_HOST, port=DEFAULT_PORT, tool=DEFAULT_TOOL,
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="spottytube-bridge",
-        description="Local HTTP bridge that runs yt_sample.py for the SpottyTube extension.",
+        description="Local HTTP bridge that runs sample_tool.py for the SpottyTube extension.",
     )
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=int(os.environ.get("SPOTTYTUBE_PORT", DEFAULT_PORT)))

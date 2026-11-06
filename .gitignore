@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 tests/args-*.txt
+
+# fetched from the Spotykach skill repo by install.sh, not vendored here
+/tools/wav_builder.py
+
+# working notes, not part of the shipped extension
+/TO-DO.txt
+/TO-DO_DONE_SO_FAR.txt

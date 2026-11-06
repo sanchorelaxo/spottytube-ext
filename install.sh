@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SpottyTube installer: link the bridge, install a user service, start it.
+# SpottyTube installer: fetch deps, link the bridge, install a user service, start it.
 #
 #   ./install.sh                 install and start
 #   ./install.sh --port 8766     use another port (edit manifest too)
@@ -44,12 +44,26 @@ chmod +x "$ROOT/bridge/spottytube_bridge.py"
 ln -sfn "$ROOT/bridge/spottytube_bridge.py" "$LINK"
 echo "linked  $LINK"
 
-chmod +x "$ROOT/tools/yt_sample.py"
-if [ ! -f "$ROOT/tools/yt_sample.py" ] || [ ! -f "$ROOT/tools/wav_builder.py" ]; then
-    echo "error: vendored tool missing (need tools/yt_sample.py and tools/wav_builder.py)" >&2
+chmod +x "$ROOT/tools/sample_tool.py" "$ROOT/tools/fetch_wav_builder.py"
+if [ ! -f "$ROOT/tools/sample_tool.py" ]; then
+    echo "error: sampling tool missing at $ROOT/tools/sample_tool.py" >&2
     exit 1
 fi
-echo "tool    $ROOT/tools/yt_sample.py (vendored, no ~/.local/bin needed)"
+echo "tool    $ROOT/tools/sample_tool.py"
+
+# wav_builder.py is not vendored here: it lives in the Spotykach skill repo and
+# is fetched so there is only ever one copy to keep correct. The fetcher checks
+# the API this project uses before replacing anything, so a bad download cannot
+# break a working install. Override with WAV_BUILDER_URL for an offline clone.
+echo "dep     fetching wav_builder.py"
+WB_ARGS=(--dest "$ROOT/tools/wav_builder.py")
+if [ -n "${WAV_BUILDER_URL:-}" ]; then
+    WB_ARGS+=(--url "$WAV_BUILDER_URL")
+fi
+if ! python3 "$ROOT/tools/fetch_wav_builder.py" "${WB_ARGS[@]}"; then
+    echo "error: could not fetch wav_builder.py (see above); sampling cannot run without it" >&2
+    exit 1
+fi
 
 if [ ! -f "$ROOT/bridge/spottytube_bridge.py" ]; then
     echo "error: bridge script missing under $ROOT/bridge" >&2
@@ -72,7 +86,7 @@ if [ "$DO_SERVICE" = 1 ]; then
     mkdir -p "$UNIT_DIR"
     cat > "$UNIT" <<UNIT_EOF
 [Unit]
-Description=SpottyTube local bridge (runs yt_sample.py for the browser extension)
+Description=SpottyTube local bridge (runs sample_tool.py for the browser extension)
 After=network.target
 
 [Service]

@@ -1,39 +1,52 @@
 #!/usr/bin/env python3
-"""Spotykach YouTube sample tool — URL + time range -> deck slot on the SD card.
+"""Spotykach sample tool — media URL + time range -> a slot on the instrument.
 
-Turns any YouTube (or any yt-dlp supported) URL plus a start/end time into a
-native Spotykach WAV placed in the tape/track slot that deck A or B loads from.
+Turns any yt-dlp supported URL (or a local file) plus a start/end time into a
+native Spotykach WAV and puts it on the target tape. Delivery prefers USB: the
+unit is asked to switch into transfer mode and the sample is written straight
+to the deck. If no unit is reachable, a mounted SD card is used instead.
 
-Why this exists: pulling a 30 s slice of a video into the Spotykach by hand is
-four steps that break in known ways — ranged downloads of YouTube media return
-403, the stale system yt-dlp fails on newer signature challenges, and a WAV
-written with a WAVE_FORMAT_EXTENSIBLE header loads silently as nothing. Each of
-those is handled here once.
+Why this exists: pulling a 30 s slice of a source into the Spotykach by hand is
+a handful of steps that break in known ways — ranged downloads return 403, the
+stale system downloader fails on signature challenges, and a WAV written with a
+WAVE_FORMAT_EXTENSIBLE header loads silently as nothing. Each of those is
+handled here once.
 
 Pipeline:
-    1. resolve the newest usable yt-dlp (system one is often stale)
-    2. download the full audio once, cached by video id, reused on later calls
+    1. find a transport (USB first, SD card second) — before any download
+    2. resolve the newest usable downloader, fetch the audio once, cached
     3. cut [start, end) with ffmpeg
-    4. rewrite the header as plain IEEE float via wav_builder.convert
-    5. install into SK/<tape>/<track>.WAV, backing up whatever was there
+    4. rewrite the header as plain IEEE float via wav_builder
+    5. shift the tape down one slot and put the new sample in slot 1
 
-Deck mapping (storage is shared; a tape is a folder, not a deck):
-    deck A -> SK/B/1.WAV      (blue tape, track 1)
-    deck B -> SK/B/2.WAV      (blue tape, track 2)
+Ordering:
+    A new sample always lands in slot 1 of its tape and pushes the rest down
+    1 -> 2 -> 3 ... -> 6. Nothing is overwritten: the sample that falls off the
+    end is renamed with a timestamp and kept (SK/ on the card, the local archive
+    directory over USB).
 
-Deck maximum loop is 42 s, so segments longer than that are refused rather than
-silently truncated.
+Deck maximum loop is 42 s, so longer segments are refused rather than silently
+truncated.
+
+Sources:
+    The downloader is a parameter, not an assumption. ``--source generic``
+    (default) treats the URL as an opaque identifier; ``--source youtube``
+    additionally parses the video id. The pipeline is identical either way.
 
 Usage:
-    python yt_sample.py --url 'https://youtu.be/Rnltl0euaSw' \\
+    python sample_tool.py --url 'https://example.org/watch/abc' \\
         --start 6:40 --end 7:10 --deck a
 
     # a local file works too — same pipeline, no download
-    python yt_sample.py --url /path/track.wav --start 12:45 --end 13:15 --deck b
+    python sample_tool.py --url /path/track.wav --start 12:45 --end 13:15 --deck b
+
+    # what can take a sample right now (used by the GUI)
+    python sample_tool.py --status --json
 """
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -44,6 +57,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import sk_install  # noqa: E402
 import wav_builder as wb  # noqa: E402
 
 # Deck ceiling from the manual: 42 s max loop per deck.
@@ -52,53 +66,114 @@ MAX_LOOP_SECONDS = 42.0
 # wav_builder writes a bare 44-byte canonical WAV header, no fact/ext chunks.
 PLAIN_WAV_HEADER = 44
 
-# (tape, track) per deck. Both decks share the blue tape so the two clips sit
-# side by side: slot 1 for A, slot 2 for B.
+# (tape, track) each deck loads from. Both decks share tape B, so the newest
+# sample sits in slot 1 for deck A and the previous one in slot 2 for deck B.
 DECK_SLOTS = {True: ("B", 1), False: ("B", 2)}
 
-DEFAULT_CACHE = Path.home() / ".hermes" / "cache" / "spotykach"
+#: Tape a new sample is written to unless another is named.
+DEFAULT_TAPE = "B"
 
-_VIDEO_ID_PATTERNS = (
-    re.compile(r"(?:v=|/v/|/embed/|/shorts/|/live/)([A-Za-z0-9_-]{11})"),
-    re.compile(r"youtu\.be/([A-Za-z0-9_-]{11})"),
-)
+DEFAULT_CACHE = Path.home() / ".hermes" / "cache" / "spotykach"
 
 
 class CardNotFound(RuntimeError):
     """No SD card with an SK/ folder could be located."""
 
 
+class TransportMissing(RuntimeError):
+    """Neither USB nor a card can take a sample right now."""
+
+
+# --- sources --------------------------------------------------------------
+
+_YOUTUBE_PATTERNS = (
+    re.compile(r"(?:v=|/v/|/embed/|/shorts/|/live/)([A-Za-z0-9_-]{11})"),
+    re.compile(r"youtu\.be/([A-Za-z0-9_-]{11})"),
+)
+
+
+@dataclass(frozen=True)
+class Source:
+    """How to identify the thing behind a URL, and what to call it."""
+
+    name: str
+    id_patterns: tuple = ()
+    description: str = ""
+
+    def identify(self, url):
+        """A stable id for this URL, or None for a local path."""
+        text = str(url)
+        if Path(text).exists():
+            return None
+        for pattern in self.id_patterns:
+            match = pattern.search(text)
+            if match:
+                return match.group(1)
+        # Anything else still needs a stable cache key; hash the URL itself so
+        # an unidentified source is cached and reused like any other.
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return digest[:16]
+
+
+SOURCES = {
+    "generic": Source("generic", (), "any URL the downloader supports"),
+    "youtube": Source("youtube", _YOUTUBE_PATTERNS, "video URLs with a parseable id"),
+}
+
+DEFAULT_SOURCE = "generic"
+
+
+def resolve_source(name=None):
+    """The :class:`Source` for ``name``, defaulting to generic handling."""
+    key = (name or DEFAULT_SOURCE).strip().lower()
+    if key not in SOURCES:
+        raise ValueError(
+            f"unknown source {name!r}; known sources: {', '.join(sorted(SOURCES))}"
+        )
+    return SOURCES[key]
+
+
+def source_id(url, source=None):
+    """A stable identifier for ``url`` under ``source``, or None for a file."""
+    return resolve_source(source).identify(url)
+
+
 @dataclass
 class SampleResult:
     source: str
-    video_id: str | None
+    source_id: str | None
     start: float
     end: float
     deck: str
     tape: str
-    track: int
+    slot: int
     segment_path: Path
-    card_path: Path | None
     installed: bool
-    backup_path: Path | None = None
+    transport: str | None = None
+    shifted: int = 0
+    archived: Path | None = None
+    card_path: Path | None = None
 
     def as_dict(self):
         return {
             "source": self.source,
-            "video_id": self.video_id,
+            "source_id": self.source_id,
             "start": self.start,
             "end": self.end,
             "deck": self.deck,
             "tape": self.tape,
-            "track": self.track,
+            "slot": self.slot,
             "segment": str(self.segment_path),
-            "card_path": str(self.card_path) if self.card_path else None,
             "installed": self.installed,
-            "backup": str(self.backup_path) if self.backup_path else None,
+            "transport": self.transport,
+            "shifted": self.shifted,
+            "archived": str(self.archived) if self.archived else None,
+            "card_path": str(self.card_path) if self.card_path else None,
         }
 
 
 # --- time parsing --------------------------------------------------------
+
 
 def parse_time(value):
     """Parse ``SS``, ``MM:SS`` or ``HH:MM:SS`` into seconds (float)."""
@@ -144,6 +219,7 @@ def deck_slot(is_deck_a):
 
 # --- small helpers -------------------------------------------------------
 
+
 def sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -152,16 +228,21 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def video_id(url):
-    """Return the 11-char YouTube id, or None if ``url`` is not a video URL."""
-    text = str(url)
-    if Path(text).exists():
-        return None
-    for pattern in _VIDEO_ID_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return match.group(1)
-    return None
+def archive_target(card, cache):
+    """Where a sample that falls off a tape is kept.
+
+    Slot 6 is not deleted: it is renamed with a timestamp and saved to SK/ on
+    the card, which is where the instrument's own hierarchy lives. Over USB
+    there is no filesystem to write to, so a mounted card still wins; with no
+    card at all the archive falls back to the local cache directory.
+    """
+    if card is not None and (Path(card) / "SK").is_dir():
+        try:
+            if os.access(Path(card) / "SK", os.W_OK):
+                return Path(card) / "SK"
+        except OSError:
+            pass
+    return Path(cache) / "archive"
 
 
 def _version_tuple(text):
@@ -169,12 +250,12 @@ def _version_tuple(text):
     return tuple(int(p) for p in parts) if parts else ()
 
 
-def resolve_ytdlp(candidates=None):
+def resolve_downloader(candidates=None):
     """Pick the newest working yt-dlp.
 
-    The distro copy is routinely months behind and fails on current YouTube
-    signature challenges with an HTTP 403 on the media request, so version
-    order decides, not PATH order.
+    The distro copy is routinely months behind and fails on current signature
+    challenges with an HTTP 403 on the media request, so version order decides,
+    not PATH order.
     """
     if candidates is None:
         candidates = []
@@ -209,7 +290,7 @@ def resolve_ytdlp(candidates=None):
 
 
 def node_binary():
-    """A JS runtime for yt-dlp's signature solving, or None."""
+    """A JS runtime for the downloader's signature solving, or None."""
     for candidate in (shutil.which("node"),
                       Path.home() / ".hermes" / "node" / "bin" / "node",
                       Path("/usr/bin/node")):
@@ -261,12 +342,11 @@ def _unmounted_fat_devices():
         return []
     if out.returncode != 0:
         return []
-    import json
-    devices = []
     try:
         tree = json.loads(out.stdout)
     except ValueError:
         return []
+    devices = []
     for node in tree.get("blockdevices", []):
         for child in node.get("children") or []:
             if child.get("fstype") in ("vfat", "exfat") and not child.get("mountpoint"):
@@ -401,41 +481,40 @@ def require_card(card=None, search_roots=None):
 
 # --- media ---------------------------------------------------------------
 
-def ensure_source(url, cache_dir):
-    """Return ``(local_path, video_id)``; downloads once and reuses the cache."""
+def ensure_source(url, cache_dir, source=None):
+    """Return ``(local_path, id)``; downloads once and reuses the cache."""
     path = Path(str(url))
     if path.exists():
         return path, None
 
-    vid = video_id(url)
-    if vid is None:
-        raise ValueError(
-            f"{url!r} is neither an existing file nor a recognizable YouTube URL"
-        )
+    resolved = resolve_source(source)
+    sid = resolved.identify(url)
+    if sid is None:
+        raise ValueError(f"{url!r} does not exist as a file")
 
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cached = sorted(cache_dir.glob(f"{vid}.*"))
+    cached = sorted(cache_dir.glob(f"{sid}.*"))
     cached = [p for p in cached if p.suffix not in (".part", ".ytdl")]
     if cached:
-        return cached[0], vid
+        return cached[0], sid
 
-    tool = resolve_ytdlp()
+    tool = resolve_downloader()
     cmd = [str(tool), "--no-warnings", "-f", "bestaudio",
-           "-o", str(cache_dir / f"{vid}.%(ext)s")]
+           "-o", str(cache_dir / f"{sid}.%(ext)s")]
     node = node_binary()
     if node is not None:
         cmd += ["--js-runtimes", f"node:{node}"]
     cmd.append(str(url))
 
     result = subprocess.run(cmd, capture_output=True, text=True)
-    downloaded = sorted(cache_dir.glob(f"{vid}.*"))
+    downloaded = sorted(cache_dir.glob(f"{sid}.*"))
     downloaded = [p for p in downloaded if p.suffix not in (".part", ".ytdl")]
     if result.returncode != 0 or not downloaded:
         detail = (result.stderr or result.stdout).strip().splitlines()
         tail = detail[-1] if detail else "no output"
-        raise RuntimeError(f"yt-dlp failed: {tail}")
-    return downloaded[0], vid
+        raise RuntimeError(f"downloader failed: {tail}")
+    return downloaded[0], sid
 
 
 def extract_segment(src, dst, start, seconds):
@@ -486,80 +565,135 @@ def extract_segment(src, dst, start, seconds):
     return dst
 
 
-def _install(segment, card_root, tape, track, backup=True, backup_dir=None):
-    """Copy the segment into its slot, backing up an existing different file."""
-    card_root = Path(card_root)
-    sk = card_root / "SK"
-    if not sk.is_dir():
-        sk = wb.build_card_root(card_root)
-    for letter in wb.TAPES:
-        (sk / letter).mkdir(parents=True, exist_ok=True)
+# --- status --------------------------------------------------------------
 
-    dst = sk / tape / f"{track}.WAV"
-    backup_path = None
-    if dst.exists() and sha256(dst) != sha256(segment) and backup:
-        target_dir = Path(backup_dir) if backup_dir else dst.parent
-        target_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{tape}_{track}_previous"
-        backup_path = target_dir / f"{stem}.WAV"
-        counter = 1
-        while backup_path.exists():
-            backup_path = target_dir / f"{stem}_{counter}.WAV"
-            counter += 1
-        shutil.copy2(dst, backup_path)
 
-    shutil.copy2(segment, dst)
-    return dst, backup_path
+def status_report(card=None, search_roots=None):
+    """What can take a sample right now — the single source of truth for the GUI.
+
+    ``ready`` is what the widget colours: False means neither transport is
+    usable, which is the red state.
+    """
+    report = {
+        "usb": {"present": False, "detail": ""},
+        "card": {"present": False, "root": None, "writable": False, "detail": ""},
+        "transport": None,
+        "ready": False,
+    }
+
+    try:
+        port = sk_install.sk_usb.find_serial_port(wait=0.0)
+        midi = sk_install.sk_usb.find_midi_port()
+        report["usb"]["present"] = bool(port or midi)
+        report["usb"]["detail"] = (
+            "in transfer mode" if port else
+            "connected, will switch to transfer mode" if midi else
+            "not connected"
+        )
+    except Exception as error:                       # noqa: BLE001 — status never raises
+        report["usb"]["detail"] = str(error)
+
+    root = Path(card) if card else None
+    if root is None:
+        try:
+            root = autodetect_card(search_roots=search_roots)
+        except Exception as error:                   # noqa: BLE001
+            report["card"]["detail"] = str(error)
+            root = None
+
+    if root is not None and (root / "SK").is_dir():
+        info = card_status(root)
+        report["card"].update({
+            "present": True,
+            "root": str(root),
+            "writable": info.writable,
+            "detail": "mounted" if info.writable else "mounted read-only",
+        })
+    elif root is not None:
+        report["card"]["detail"] = f"{root} has no SK/ folder"
+    else:
+        report["card"]["detail"] = "no card mounted"
+
+    if report["usb"]["present"]:
+        report["transport"] = "usb"
+    elif report["card"]["present"] and report["card"]["writable"]:
+        report["transport"] = "card"
+    report["ready"] = report["transport"] is not None
+    return report
 
 
 def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
-                 search_roots=None, install=True, backup=True):
-    """Build a deck segment and (by default) install it into its SD slot.
+                 search_roots=None, install=True, source=None, transport=None,
+                 tape=None, archive_dir=None):
+    """Build a segment and (by default) install it on the instrument.
 
-    ``Start``/``end`` accept ``SS``/``MM:SS``/``HH:MM:SS``. When ``url`` is an
+    ``start``/``end`` accept ``SS``/``MM:SS``/``HH:MM:SS``. When ``url`` is an
     existing local file the download step is skipped, which is what the tests
     use and what makes offline use possible.
+
+    The transport is chosen before anything is downloaded: USB first, the card
+    second, unless ``transport`` names one (``auto``/``usb``/``card``).
     """
     start_s = parse_time(start)
     end_s = parse_time(end)
     if end_s <= start_s:
-        raise ValueError(
-            f"end ({end_s:g}s) must be after start ({start_s:g}s)"
-        )
+        raise ValueError(f"end ({end_s:g}s) must be after start ({start_s:g}s)")
     duration = end_s - start_s
     if duration > MAX_LOOP_SECONDS:
         raise ValueError(
             f"segment is {duration:g}s; a deck holds {MAX_LOOP_SECONDS:g}s max"
         )
 
-    tape, track = deck_slot(is_deck_a)
+    target_tape = (tape or DEFAULT_TAPE).upper()
+    if target_tape not in wb.TAPES:
+        raise ValueError(
+            f"tape {target_tape!r} is not one of {' '.join(sorted(wb.TAPES))}"
+        )
     cache = Path(cache_dir) if cache_dir else DEFAULT_CACHE
+    archive = archive_dir or archive_target(card, cache)
 
-    # Card first. A missing card must cost nothing, so nothing is downloaded,
-    # cut or cached until a writable root is in hand.
-    card_root = require_card(card, search_roots) if install else None
+    chosen = None
+    card_root = None
+    if install:
+        if card is not None or (transport or "auto").lower() in ("auto", "card"):
+            try:
+                card_root = require_card(card, search_roots)
+            except CardNotFound:
+                card_root = None
+                if (transport or "auto").lower() == "card":
+                    raise
+        try:
+            chosen = sk_install.open_transport(
+                transport or "auto", card_root=card_root,
+                archive_dir=archive,
+            )
+        except sk_install.NoTransport as error:
+            raise TransportMissing(
+                "cannot deliver the sample — " + "; ".join(error.reasons)
+            ) from None
 
-    source, vid = ensure_source(url, cache)
-    label = vid or Path(source).stem
+    media, sid = ensure_source(url, cache, source=source)
+    label = sid or Path(media).stem
     segment = cache / "segments" / f"{label}_{int(start_s)}-{int(end_s)}.WAV"
-    extract_segment(source, segment, start_s, duration)
+    extract_segment(media, segment, start_s, duration)
 
     result = SampleResult(
-        source=str(url), video_id=vid, start=start_s, end=end_s,
-        deck="A" if is_deck_a else "B", tape=tape, track=track,
-        segment_path=segment, card_path=None, installed=False,
+        source=str(url), source_id=sid, start=start_s, end=end_s,
+        deck="A" if is_deck_a else "B", tape=target_tape, slot=1,
+        segment_path=segment, installed=False,
     )
     if not install:
         return result
 
-    dst, backup_path = _install(segment, card_root, tape, track,
-                                backup=backup, backup_dir=cache / "backup")
-    if sha256(dst) != sha256(segment):
-        raise RuntimeError(f"copy verification failed for {dst}")
-
-    result.card_path = dst
+    placement = sk_install.install_sample(
+        chosen, target_tape, segment.read_bytes(), archive_dir=archive,
+    )
     result.installed = True
-    result.backup_path = backup_path
+    result.transport = placement.transport
+    result.shifted = placement.shifted
+    result.archived = placement.archived
+    if placement.transport == "card":
+        result.card_path = Path(chosen.slot_path(target_tape, placement.slot))
     return result
 
 
@@ -591,6 +725,16 @@ def format_card_status(status):
     return "\n".join(lines)
 
 
+def format_status(report):
+    """Human-readable version of :func:`status_report`."""
+    lines = [f"transport: {report['transport'] or 'NONE — red in the GUI'}"]
+    lines.append(f"  usb:  {'yes' if report['usb']['present'] else 'no'}"
+                 f"  ({report['usb']['detail']})")
+    lines.append(f"  card: {'yes' if report['card']['present'] else 'no'}"
+                 f"  ({report['card']['detail']})")
+    return "\n".join(lines)
+
+
 def _check_card(args):
     """`--check-card`: report readiness without downloading or writing."""
     root = require_card(args.card, None)
@@ -607,25 +751,40 @@ def _check_card(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="yt_sample.py",
+        prog="sample_tool.py",
         description=(
-            "Cut a YouTube video segment into a Spotykach deck slot "
-            "(deck A -> SK/B/1.WAV, deck B -> SK/B/2.WAV)."
+            "Cut a segment of any supported URL into a Spotykach slot "
+            "(USB first, SD card as fallback)."
         ),
     )
-    parser.add_argument("--url", help="YouTube URL, or a local file to skip downloading")
+    parser.add_argument("--url", "--source-url", dest="url",
+                        help="URL the downloader supports, or a local file")
+    parser.add_argument("--source", default=None,
+                        help=f"how to identify the URL ({', '.join(sorted(SOURCES))}; "
+                             f"default {DEFAULT_SOURCE})")
     parser.add_argument("--start", help="SS, MM:SS or HH:MM:SS")
     parser.add_argument("--end", help="SS, MM:SS or HH:MM:SS")
     parser.add_argument("--deck", choices=["a", "b"],
                         help="which deck loads it (isDeckA true/false)")
+    parser.add_argument("--tape", default=DEFAULT_TAPE,
+                        help=f"tape to write ({' '.join(sorted(wb.TAPES))}; "
+                             f"default {DEFAULT_TAPE})")
+    parser.add_argument("--transport", choices=["auto", "usb", "card"], default="auto",
+                        help="delivery path (default auto: usb, then card)")
     parser.add_argument("--card", help="card mount point (auto-detected if omitted)")
     parser.add_argument("--cache-dir", help=f"download cache (default {DEFAULT_CACHE})")
+    parser.add_argument("--archive-dir", help="where samples that fall off a tape go")
     parser.add_argument("--check-card", action="store_true",
                         help="only report whether the SD card is ready, then exit")
-    parser.add_argument("--no-backup", action="store_true",
-                        help="overwrite the slot without keeping the old file")
+    parser.add_argument("--status", action="store_true",
+                        help="report which transports are usable right now, then exit")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
+
+    if args.status:
+        report = status_report(card=args.card)
+        print(json.dumps(report, indent=2) if args.json else format_status(report))
+        return 0 if report["ready"] else 1
 
     if args.check_card:
         try:
@@ -641,35 +800,28 @@ def main(argv=None):
         parser.error("the following arguments are required: " + ", ".join(missing))
 
     try:
-        card_root = require_card(args.card, None)
-        status = card_status(card_root)
-        problems = blocking_problems(status)
-        if problems:
-            raise CardNotFound(f"{card_root} is not usable: {'; '.join(problems)}")
-        print(f"card: {card_root}  (ready)")
-        if status.tapes_missing:
-            print(f"note: no folder for tape {' '.join(status.tapes_missing)} yet; "
-                  f"it will be created before the slot is written")
         result = build_sample(
             args.url, args.start, args.end, args.deck == "a",
-            card=card_root, cache_dir=args.cache_dir, backup=not args.no_backup,
+            card=args.card, cache_dir=args.cache_dir, source=args.source,
+            transport=args.transport, tape=args.tape, archive_dir=args.archive_dir,
         )
     except (ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
     if args.json:
-        import json
         print(json.dumps(result.as_dict(), indent=2))
     else:
-        print(f"deck {result.deck} -> {result.tape}/{result.track}.WAV")
-        print(f"segment: {result.segment_path} "
-              f"({result.end - result.start:g}s)")
-        print(f"installed: {result.card_path}")
-        if result.backup_path:
-            print(f"previous slot backed up: {result.backup_path}")
-        print("Power-cycle with the card in, then load the slot on that deck "
-              "once — that is what registers its pre-load.")
+        print(f"deck {result.deck} | tape {result.tape} slot {result.slot}"
+              f" via {result.transport}")
+        print(f"segment: {result.segment_path} ({result.end - result.start:g}s)")
+        print(f"installed: yes, verified"
+              f"{' (shifted ' + str(result.shifted) + ' slots)' if result.shifted else ''}")
+        if result.archived:
+            print(f"fell off the tape, archived: {result.archived}")
+        if result.transport == "card":
+            print("Power-cycle with the card in, then load the slot on that deck "
+                  "once — that is what registers its pre-load.")
     return 0
 
 
