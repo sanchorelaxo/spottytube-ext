@@ -214,6 +214,47 @@ class TestSample(ServerCase):
         except urllib.error.HTTPError as error:
             self.assertEqual(error.code, 400)
 
+    # -- playback speed ---------------------------------------------------
+
+    def test_speed_reaches_the_tool(self):
+        status, body, _ = self.request("/sample", "POST", dict(self.payload, speed=1.5))
+        self.assertEqual(status, 202, body)
+        self.wait_job(body["job_id"])
+        argv = self.args_file.read_text().split("\n")
+        self.assertIn("--speed", argv)
+        self.assertEqual(argv[argv.index("--speed") + 1], "1.5")
+        self.assertEqual(body["meta"]["speed"], 1.5)
+
+    def test_absent_speed_means_normal_and_no_flag(self):
+        status, body, _ = self.request("/sample", "POST", self.payload)
+        self.assertEqual(status, 202)
+        self.wait_job(body["job_id"])
+        self.assertNotIn("--speed", self.args_file.read_text().split("\n"))
+        self.assertEqual(body["meta"]["speed"], 1)
+
+    def test_a_whole_number_speed_is_written_without_a_trailing_zero(self):
+        status, body, _ = self.request("/sample", "POST", dict(self.payload, speed=2))
+        self.assertEqual(status, 202)
+        self.wait_job(body["job_id"])
+        argv = self.args_file.read_text().split("\n")
+        self.assertEqual(argv[argv.index("--speed") + 1], "2")
+
+    def test_speed_outside_the_player_range_is_rejected(self):
+        for bad in (0, -1, 0.1, 2.5, "abc", "fast", True):
+            with self.subTest(bad=bad):
+                status, body, _ = self.request(
+                    "/sample", "POST", dict(self.payload, speed=bad))
+                self.assertEqual(status, 400, body)
+                self.assertIn("speed", body["error"])
+        self.assertFalse(self.args_file.exists(), "tool must not run for a bad speed")
+
+    def test_a_speed_that_would_overrun_the_deck_is_rejected(self):
+        payload = dict(self.payload, start="0:00", end="0:30", speed=0.5)
+        status, body, _ = self.request("/sample", "POST", payload)
+        self.assertEqual(status, 400)
+        self.assertIn("42", body["error"])
+        self.assertFalse(self.args_file.exists())
+
 
 class TestCors(ServerCase):
     def test_extension_origin_is_echoed(self):

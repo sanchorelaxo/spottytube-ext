@@ -343,5 +343,150 @@ class TestBuildSample(CardFixture):
                 cache_dir=self.root / "cache", tape="Z", install=False)
 
 
+def wav_seconds(path):
+    """Length of a plain Spotykach WAV, read from its data chunk."""
+    raw = Path(path).read_bytes()
+    return (len(raw) - 44) / (4 * 48000 * 2)
+
+
+class TestSpeed(unittest.TestCase):
+    """The speed the user heard is the speed stored, via ffmpeg's atempo."""
+
+    def test_normal_speed_adds_no_filter(self):
+        self.assertEqual(sample_tool.atempo_chain(1.0), [])
+        self.assertEqual(sample_tool.atempo_chain("1"), [])
+
+    def test_in_range_speeds_are_one_step(self):
+        self.assertEqual(sample_tool.atempo_chain(0.5), ["atempo=0.5"])
+        self.assertEqual(sample_tool.atempo_chain(1.5), ["atempo=1.5"])
+        self.assertEqual(sample_tool.atempo_chain(2), ["atempo=2"])
+
+    def test_speeds_below_half_are_chained(self):
+        # atempo only accepts 0.5..2.0 per stage; 0.25 is two halves.
+        self.assertEqual(sample_tool.atempo_chain(0.25), ["atempo=0.5", "atempo=0.5"])
+        self.assertEqual(sample_tool.atempo_chain(0.3), ["atempo=0.5", "atempo=0.6"])
+
+    def test_the_chain_multiplies_back_to_the_requested_speed(self):
+        for speed in (0.25, 0.3, 0.4, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0):
+            with self.subTest(speed=speed):
+                total = 1.0
+                for step in sample_tool.atempo_chain(speed):
+                    total *= float(step.split("=")[1])
+                self.assertAlmostEqual(total, speed, places=6)
+
+    def test_validate_accepts_strings_and_the_default(self):
+        self.assertEqual(sample_tool.validate_speed(None), 1.0)
+        self.assertEqual(sample_tool.validate_speed("1.5"), 1.5)
+        self.assertEqual(sample_tool.validate_speed(1), 1.0)
+
+    def test_validate_refuses_what_the_player_cannot_do(self):
+        for bad in (0, -1, 0.1, 2.5, "abc", "", True, float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    sample_tool.validate_speed(bad)
+
+    def test_the_message_names_the_range(self):
+        with self.assertRaises(ValueError) as caught:
+            sample_tool.validate_speed(3)
+        self.assertIn("0.25", str(caught.exception))
+        self.assertIn("2", str(caught.exception))
+
+
+class TestRetime(unittest.TestCase):
+    """The re-time pass: a separate step over the sliced segment."""
+
+    def test_the_video_filter_is_the_inverse_of_the_speed(self):
+        # setpts scales timestamps, so half speed needs twice the timestamps.
+        self.assertEqual(sample_tool.retime_video_filter(0.5), "setpts=2*PTS")
+        self.assertEqual(sample_tool.retime_video_filter(2), "setpts=0.5*PTS")
+        self.assertEqual(sample_tool.retime_video_filter(1), "setpts=1*PTS")
+
+    def test_the_speed_range_is_still_enforced(self):
+        for bad in (0, 3, "x", True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    sample_tool.retime_video_filter(bad)
+
+
+class TestSpeedCut(CardFixture):
+    """Real ffmpeg runs: slice plain, then re-record at the heard speed."""
+
+    def build(self, seconds, start="0:00", end=None, speed=1.0):
+        source = self.root / "source.wav"
+        if not source.exists():
+            source.write_bytes(wav(1, seconds=seconds))
+        return sample_tool.build_sample(
+            str(source), start, end or f"0:0{seconds:g}", True,
+            card=self.root, cache_dir=self.root / "cache", install=False,
+            speed=speed)
+
+    def test_the_slice_itself_is_never_speeded(self):
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=6))
+        cut = self.root / "cut.wav"
+        sample_tool.extract_segment(source, cut, 0, 4)
+        self.assertAlmostEqual(wav_seconds(cut), 4.0, delta=0.05)
+        out = self.root / "out.wav"
+        sample_tool.retime_segment(cut, out, 0.5)
+        self.assertAlmostEqual(wav_seconds(out), 8.0, delta=0.08)
+
+    def test_one_x_leaves_the_cut_alone(self):
+        result = self.build(4, "0:00", "0:04", speed=1.0)
+        self.assertAlmostEqual(wav_seconds(result.segment_path), 4.0, delta=0.05)
+
+    def test_no_working_files_survive_the_build(self):
+        self.build(4, "0:00", "0:02", speed=0.5)
+        leftovers = [p.name for p in (self.root / "cache" / "segments").iterdir()
+                     if ".cut." in p.name or ".retime." in p.name]
+        self.assertEqual(leftovers, [])
+
+    def test_double_speed_halves_the_stored_length(self):
+        result = self.build(4, "0:00", "0:04", speed=2.0)
+        self.assertAlmostEqual(wav_seconds(result.segment_path), 2.0, delta=0.06)
+        self.assertEqual(result.speed, 2.0)
+
+    def test_half_speed_doubles_the_stored_length(self):
+        result = self.build(4, "0:00", "0:02", speed=0.5)
+        self.assertAlmostEqual(wav_seconds(result.segment_path), 4.0, delta=0.06)
+
+    def test_quarter_speed_survives_the_chained_filter(self):
+        result = self.build(4, "0:00", "0:01", speed=0.25)
+        self.assertAlmostEqual(wav_seconds(result.segment_path), 4.0, delta=0.08)
+
+    def test_speed_is_part_of_the_segment_name(self):
+        slow = self.build(4, "0:00", "0:02", speed=0.5)
+        fast = self.build(4, "0:00", "0:02", speed=2.0)
+        self.assertNotEqual(slow.segment_path, fast.segment_path)
+        self.assertIn("0.5x", slow.segment_path.name)
+        self.assertIn("2x", fast.segment_path.name)
+
+    def test_a_slow_down_that_would_overrun_the_deck_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            self.build(40, "0:00", "0:30", speed=0.5)
+        self.assertIn("42", str(caught.exception))
+        self.assertIn("0.5x", str(caught.exception))
+
+    def test_a_slow_down_that_still_fits_is_allowed(self):
+        result = self.build(40, "0:00", "0:21", speed=0.5)
+        self.assertAlmostEqual(wav_seconds(result.segment_path), 42.0, delta=0.1)
+
+    def test_as_dict_carries_the_speed(self):
+        result = self.build(4, "0:00", "0:02", speed=1.5)
+        self.assertEqual(result.as_dict()["speed"], 1.5)
+
+    def test_cli_refuses_a_speed_past_two(self):
+        import contextlib
+        import io
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=2.0))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = sample_tool.main([
+                "--url", str(source), "--start", "0:00", "--end", "0:01",
+                "--deck", "a", "--speed", "3", "--json"])
+        self.assertEqual(code, 1)
+        self.assertIn("0.25", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

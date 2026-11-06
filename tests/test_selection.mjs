@@ -80,6 +80,14 @@ test("exactly at the limit is allowed", () => {
   assert.equal(r.overLimit, false);
 });
 
+test("the cap does not move with the speed: 60s is too long at any rate", () => {
+  const pair = createPair();
+  pair.click(0);
+  const r = pair.click(60);          // would fit at 2x, still refused
+  assert.equal(r.action, "end-too-long");
+  assert.equal(r.overLimit, true);
+});
+
 test("reset clears both indexes", () => {
   const pair = createPair();
   pair.click(10);

@@ -11,9 +11,11 @@
 
   const pair = window.SpottySelection.createPair();
   const MAX_LOOP = window.SpottySelection.MAX_LOOP;
+  const rate = window.SpottySpeed.create();
   const LONG_PRESS_MS = 550;
   const POLL_MS = 1200;
   const POLL_LIMIT_MS = 16 * 60 * 1000;
+  const RATE_MS = 500;
 
   const ui = { deck: "a", collapsed: false, left: null, top: null,
              busy: false, timer: null, online: null, ready: false, transport: null };
@@ -77,6 +79,7 @@
       .dot.on { background: #3ecf8e; box-shadow: 0 0 6px #3ecf8e88; }
       .dot.off { background: #e5484d; }
       .name { font-weight: 600; letter-spacing: .02em; }
+      .ver { font-size: 10px; opacity: .45; }
       .vid { margin-left: auto; font: 11px/1 ui-monospace, monospace; color: #8b93a1; }
       .fold {
         all: unset; cursor: pointer; color: #8b93a1; padding: 2px 4px;
@@ -107,6 +110,34 @@
         background: #0f1115; border: 1px solid #262a33; color: #98a0b0; font-size: 12px;
       }
       .deck.on { background: #24303f; border-color: #3c5070; color: #dfe8f5; font-weight: 600; }
+      .speedrow {
+        display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+      }
+      .speed {
+        -webkit-appearance: none; appearance: none; width: 100%; height: 4px; margin: 0;
+        border-radius: 4px; background: #262a33; outline: none; cursor: pointer;
+      }
+      .speed::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+        border-radius: 50%; background: #f5c451; border: 0; cursor: pointer;
+      }
+      .speed:disabled { opacity: .45; cursor: default; }
+      .speed:disabled::-webkit-slider-thumb { background: #7d8494; cursor: default; }
+      .rate {
+        min-width: 48px; text-align: right;
+        font: 500 12px/1 ui-monospace, SFMono-Regular, monospace; color: #f0f1f4;
+      }
+      .snap {
+        all: unset; box-sizing: border-box; width: 100%; text-align: center; cursor: pointer;
+        padding: 6px 0; border-radius: 7px; background: #0f1115;
+        border: 1px solid #262a33; color: #98a0b0; font-size: 11px; letter-spacing: .05em;
+      }
+      .snap.on { background: #24303f; border-color: #3c5070; color: #dfe8f5; font-weight: 600; }
+      .snap.on .snapdot { background: #3ecf8e; }
+      .snapdot {
+        display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+        background: #4b5262; margin-right: 5px; vertical-align: 1px;
+      }
       .send {
         all: unset; box-sizing: border-box; width: 100%; text-align: center; cursor: pointer;
         padding: 9px; border-radius: 8px; background: #2a2e37; color: #e8e9ec;
@@ -128,6 +159,7 @@
       <div class="bar">
         <span class="dot" title="bridge status"></span>
         <span class="name">SpottyTube</span>
+        <span class="ver" title="extension version"></span>
         <span class="vid"></span>
         <button class="fold" title="collapse">&#8211;</button>
       </div>
@@ -143,6 +175,12 @@
           <button class="deck on" data-deck="a">Deck A</button>
           <button class="deck" data-deck="b">Deck B</button>
         </div>
+        <div class="speedrow">
+          <input class="speed" type="range" min="0.25" max="2" step="0.05" value="1"
+                 aria-label="playback speed">
+          <output class="rate">1.00x</output>
+        </div>
+        <button class="snap" aria-pressed="false"><span class="snapdot"></span><span class="snaptext">SNAP TO PLAYER</span></button>
         <button class="send" disabled>Send to deck</button>
         <div class="status"></div>
       </div>
@@ -156,12 +194,17 @@
     bar: root.querySelector(".bar"),
     dot: root.querySelector(".dot"),
     vid: root.querySelector(".vid"),
+    ver: root.querySelector(".ver"),
     fold: root.querySelector(".fold"),
     start: root.querySelector('[data-k="start"]'),
     end: root.querySelector('[data-k="end"]'),
     len: root.querySelector(".len"),
     set: root.querySelector(".set"),
     send: root.querySelector(".send"),
+    speed: root.querySelector(".speed"),
+    rate: root.querySelector(".rate"),
+    snap: root.querySelector(".snap"),
+    snaptext: root.querySelector(".snaptext"),
     status: root.querySelector(".status"),
     decks: Array.from(root.querySelectorAll(".deck"))
   };
@@ -174,21 +217,42 @@
   }
 
   function render() {
+    const sp = rate.state();
     const s = pair.state();
+    // What the deck will actually hold: a slowed-down range is longer than the
+    // range you picked, and the 42 s ceiling applies to what gets stored.
+    const stored = window.SpottySpeed.outputSeconds(s.duration, sp.speed);
+    const overDeck = Boolean(s.overLimit) ||
+      (stored !== null && stored > MAX_LOOP + 1e-9);
 
     el.start.classList.toggle("empty", s.start === null);
     el.start.querySelector("output").textContent = s.start === null ? "\u2013\u2013" : fmt(s.start);
     el.end.classList.toggle("empty", s.end === null);
     el.end.querySelector("output").textContent = s.end === null ? "\u2013\u2013" : fmt(s.end);
 
-    el.len.classList.toggle("over", Boolean(s.overLimit));
+    el.len.classList.toggle("over", overDeck);
     el.len.querySelector("output").textContent =
-      s.duration === null ? "\u2013\u2013" : `${s.duration}s`;
+      stored === null ? "\u2013\u2013" : `${Math.round(stored * 10) / 10}s`;
+    el.len.title = s.duration === null
+      ? ""
+      : `${s.duration}s of source at ${sp.label} \u2192 ${Math.round(stored * 10) / 10}s on the deck`;
 
     el.set.textContent = s.complete ? "NEW SELECTION" : (s.start === null ? "SET START" : "SET END");
     el.set.classList.toggle("armed", s.start !== null && !s.complete);
 
-    el.send.disabled = !s.complete || s.overLimit || ui.busy || !ui.ready;
+    el.speed.value = String(sp.speed);
+    el.speed.disabled = sp.snap;
+    el.rate.textContent = sp.label;
+    el.snap.classList.toggle("on", sp.snap);
+    el.snap.setAttribute("aria-pressed", sp.snap ? "true" : "false");
+    el.snaptext.textContent = sp.snap ? "SNAPPED TO PLAYER" : "SNAP TO PLAYER";
+    el.snap.title = sp.snap
+      ? "speed follows the player; move the slider to take over"
+      : (sp.player === null
+          ? "follow the player's speed"
+          : `follow the player's speed (now ${window.SpottySpeed.label(sp.player)})`);
+
+    el.send.disabled = !s.complete || overDeck || ui.busy || !ui.ready;
     el.send.textContent = ui.busy ? "Working\u2026" : "Send to deck";
 
     el.decks.forEach((b) => b.classList.toggle("on", b.dataset.deck === ui.deck));
@@ -248,12 +312,14 @@
     if (result.action === "rejected") {
       setStatus(result.reason, "err");
     } else if (result.action === "end-too-long") {
-      setStatus(`${result.duration}s is over the ${MAX_LOOP}s deck limit. ` +
+      setStatus(`${result.duration}s is over the ${MAX_LOOP}s maximum slice. ` +
                 "Click to start a new pair, hold to clear.", "err");
     } else if (result.action === "start-moved") {
       setStatus(`in-point moved to ${fmt(result.start)} (was after the out-point)`, "");
     } else if (result.action === "end") {
-      setStatus(`${fmt(result.start)} \u2192 ${fmt(result.end)} (${result.duration}s) — ready`, "");
+      const sp = rate.state();
+      const at = sp.speed === 1 ? "" : ` at ${sp.label}`;
+      setStatus(`${fmt(result.start)} \u2192 ${fmt(result.end)} (${result.duration}s${at}) — ready`, "");
     } else if (result.action === "restart") {
       setStatus(`new pair from ${fmt(result.start)}`, "");
     } else {
@@ -308,12 +374,56 @@
     });
   });
 
+  // --- speed --------------------------------------------------------------
+
+  // The player is the only thing that knows the rate; everything here just
+  // reads it. No page-specific API: any <video> element reports playbackRate.
+  function playerRate() {
+    const el = video();
+    const value = el && el.playbackRate;
+    return typeof value === "number" && isFinite(value) && value > 0 ? value : null;
+  }
+
+  el.speed.addEventListener("input", (event) => {
+    event.stopPropagation();
+    if (!rate.set(el.speed.value)) return;   // snapped: the player is in charge
+    render();
+    persist();
+  });
+
+  el.snap.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const on = rate.toggleSnap(playerRate());
+    render();
+    persist();
+    setStatus(on ? `speed follows the player at ${rate.state().label}` : "", "");
+  });
+
+  // No event fires on a speed change everywhere, so it is polled. Cheap: one
+  // property read.
+  let lastRate = null;
+  function watchRate() {
+    const now = playerRate();
+    if (now === null || now === lastRate) return;
+    lastRate = now;
+    const followed = rate.follow(now);
+    render();
+    if (followed) {
+      persist();
+      setStatus(`speed follows the player at ${rate.state().label}`, "");
+    }
+  }
+
   // --- send ---------------------------------------------------------------
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   function ask(message) {
     return new Promise((resolve) => {
+      if (!alive()) {
+        resolve({ ok: false, offline: true, error: "the extension was reloaded — reload this page" });
+        return;
+      }
       chrome.runtime.sendMessage(message, (reply) => {
         if (chrome.runtime.lastError) {
           resolve({ ok: false, offline: true, error: chrome.runtime.lastError.message });
@@ -339,8 +449,9 @@
       }
       if (job.status === "done" && job.result) {
         const r = job.result;
+        const at = r.speed && r.speed !== 1 ? ` @ ${Number(r.speed).toFixed(2)}x` : "";
         setStatus(`deck ${r.deck} \u2190 ${r.tape}/${r.track}.WAV \u00b7 ` +
-                  `${Math.round(r.end - r.start)}s\n${r.card_path || r.segment}`, "ok");
+                  `${Math.round(r.end - r.start)}s${at}\n${r.card_path || r.segment}`, "ok");
         return true;
       }
       const detail = (job.stderr || job.stdout || "sampling tool failed").trim();
@@ -367,7 +478,8 @@
         url: pageUrl(),
         start: fmt(s.start),
         end: fmt(s.end),
-        deck: ui.deck
+        deck: ui.deck,
+        speed: rate.state().speed
       }
     });
 
@@ -389,10 +501,40 @@
   // --- drag + persist -----------------------------------------------------
 
   function persist() {
+    if (!alive()) return;
     try {
-      chrome.storage.local.set({ spottytube: { deck: ui.deck, collapsed: ui.collapsed, left: ui.left, top: ui.top } });
+      const sp = rate.state();
+      // Callback form on purpose: the promise form rejects with "Extension
+      // context invalidated" inside a page that outlived the extension, and a
+      // rejection nobody handles surfaces as an uncaught error in the console.
+      chrome.storage.local.set({ spottytube: {
+        deck: ui.deck, collapsed: ui.collapsed, left: ui.left, top: ui.top,
+        speed: sp.speed, snap: sp.snap, player: sp.player
+      } }, () => { void chrome.runtime.lastError; });
     } catch { /* ignore */ }
   }
+
+  // Reloading or updating the extension detaches every copy that is already
+  // running in a page, and each chrome.* call then throws "Extension context
+  // invalidated". Rather than poll a dead API forever, the widget checks and
+  // takes itself out of the page; the next page load injects a fresh copy.
+  function alive() {
+    try { return Boolean(chrome.runtime && chrome.runtime.id); }
+    catch { return false; }
+  }
+
+  function teardown() {
+    clearInterval(rateTimer);
+    clearInterval(statusTimer);
+    clearInterval(hrefTimer);
+    document.removeEventListener("yt-navigate-finish", onNavigate, true);
+    document.removeEventListener("yt-page-data-updated", onNavigate, true);
+    root.remove();
+  }
+
+  let rateTimer = null;
+  let statusTimer = null;
+  let hrefTimer = null;
 
   function place(left, top) {
     const width = 268;
@@ -445,7 +587,8 @@
   document.addEventListener("yt-page-data-updated", onNavigate, true);
 
   let lastHref = location.href;
-  setInterval(() => {
+  hrefTimer = setInterval(() => {
+    if (!alive()) { teardown(); return; }
     if (location.href !== lastHref) {
       lastHref = location.href;
       onNavigate();
@@ -481,6 +624,14 @@
     }
   }
 
+  // Shown in the bar so a browser still running an older copy is obvious at a
+  // glance after an update; reload the extension to pick up new code.
+  try {
+    el.ver.textContent = "v" + chrome.runtime.getManifest().version;
+  } catch {
+    el.ver.remove();
+  }
+
   // Restore saved UI state, then check the bridge once.
   try {
     chrome.storage.local.get("spottytube", (saved) => {
@@ -488,6 +639,7 @@
       if (s) {
         ui.deck = s.deck === "b" ? "b" : "a";
         ui.collapsed = Boolean(s.collapsed);
+        rate.restore(s);
         if (typeof s.left === "number" && typeof s.top === "number") place(s.left, s.top);
       }
       render();
@@ -497,8 +649,13 @@
   }
 
   render();
+  watchRate();
+  rateTimer = setInterval(() => { if (alive()) watchRate(); else teardown(); }, RATE_MS);
   refreshStatus();
   // The Spotykach drops out of transfer mode on its own, so re-check even when
   // the page does nothing; the dot has to go red on its own too.
-  setInterval(refreshStatus, 20000);
+  statusTimer = setInterval(() => {
+    if (alive()) refreshStatus();
+    else teardown();
+  }, 20000);
 })();

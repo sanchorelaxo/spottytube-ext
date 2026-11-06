@@ -91,16 +91,29 @@ pipeline needs no change).
   impossible range.
 - **Deck A / Deck B** picks which slot on tape B that deck loads: slot 1 for
   deck A, slot 2 for deck B. `--tape` sends to another tape.
+- **Playback speed** slider (0.25x-2x, in 0.05 steps) says how fast the range
+  was heard. The slice is cut normally and then re-recorded in a second ffmpeg
+  pass, so the deck still gets an ordinary normal-speed WAV — just a longer or
+  shorter one: 4 s at 0.5x becomes 8 s, 6 s at 2x becomes 3 s. 1x skips the
+  pass entirely.
+- **SNAP TO PLAYER** keeps the slider on the rate the page's `<video>` element
+  is actually running at (`playbackRate`, read every 0.5 s, no site API). Turn
+  it off and the slider stays where the player left it. The button is
+  `aria-pressed`; the readout shows the current rate.
 - **Send to deck** posts the range; the status line reports the transport and
   then the finished slot.
 - Green dot: the bridge is up and something can take a sample. Red dot: the
   bridge is down, or neither USB nor a card is available (the Send button is
   disabled). It re-checks every 20 s.
-- Drag the title bar to move it; position, deck and collapsed state persist.
+- Drag the title bar to move it; position, deck, collapsed state, speed and
+  snap persist.
 
 Times are whole seconds; `sample_tool` parses `SS`, `MM:SS` or `HH:MM:SS`.
-Segments over the 42 s deck limit are refused by the widget, the bridge and the
-tool.
+The 42 s ceiling is fixed: it caps the range you pick, and it caps what the
+deck stores, so slowing a range down does not buy you a longer selection — at
+0.5x only 21 s of source fits in 42 s of tape, and at 2x a 42 s pick simply
+becomes a 21 s sample. The widget, the bridge and the tool all refuse a range
+whose stored length is over 42 s.
 
 ## Slot order
 
@@ -136,14 +149,17 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -v            # 87 python tests
-    node --test tests/test_selection.mjs                # 9 state-machine tests
+    python3 -m unittest discover -s tests -v            # 112 python tests
+    node --test tests/test_selection.mjs \
+                tests/test_speed.mjs \
+                tests/test_widget_wiring.mjs            # 40 widget tests
 
-- `tests/test_bridge.py` — 24 tests, real HTTP against `tests/stub_tool.py`, so
+- `tests/test_bridge.py` — 29 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
-- `tests/test_sample_tool.py` — 31 tests: time parsing, generic source ids,
-  transport choice, and the slot shift against a real directory tree (shift,
-  archive, read-back check, partial tapes, untouched neighbours).
+- `tests/test_sample_tool.py` — 51 tests: time parsing, generic source ids,
+  transport choice, the slot shift against a real directory tree (shift,
+  archive, read-back check, partial tapes, untouched neighbours), and the
+  speed cut, measured by decoding the WAVs ffmpeg actually produced.
 - `tests/test_install_browsers.py` — 20 tests: browser detection and filtering
   run under a throwaway PATH of stub executables, so no browser on the machine
   leaks into a result and no root is needed. Covers native, snap and Flatpak
@@ -153,6 +169,12 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
   download without clobbering a good copy, the upstream file still has the API
   this project calls, the installed copy matches upstream, and a real ffmpeg
   cut converts to a 48 kHz stereo float32 WAV.
+- `tests/test_speed.mjs` — the speed model in a `vm` sandbox: clamping to
+  0.25x-2x, the `1.00x` label, stored length, snap on/off, and restoring a
+  saved slider. `tests/test_widget_wiring.mjs` guards the contract between
+  `content.js` and the files it loads: script order in the manifest, the slider
+  range, the snap control, `speed` in the sample payload, `playbackRate`
+  polling, and persistence.
 
 The two upstream tests skip themselves when GitHub is unreachable; everything
 local, including the ffmpeg conversion, always runs.
@@ -197,7 +219,8 @@ skipped instead of aborting the card scan.
     extension/background.js        all fetches to the bridge happen here
     extension/content.js           the widget (shadow DOM, no page CSS leaks)
     extension/selection.js         start/end state machine (tested in node)
-    tests/                         bridge, tool, dependency and state-machine tests
+    extension/speed.js             playback-rate model (tested in node)
+    tests/                         bridge, tool, dependency and widget tests
 
 ## Licence
 

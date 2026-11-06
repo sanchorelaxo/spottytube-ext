@@ -47,6 +47,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -62,6 +63,11 @@ import wav_builder as wb  # noqa: E402
 
 # Deck ceiling from the manual: 42 s max loop per deck.
 MAX_LOOP_SECONDS = 42.0
+
+# Playback rates a player offers. Below 1x the stored sample is longer than the
+# range you picked, so the deck ceiling can be hit from the slow side too.
+MIN_SPEED = 0.25
+MAX_SPEED = 2.0
 
 # wav_builder writes a bare 44-byte canonical WAV header, no fact/ext chunks.
 PLAIN_WAV_HEADER = 44
@@ -153,6 +159,7 @@ class SampleResult:
     shifted: int = 0
     archived: Path | None = None
     card_path: Path | None = None
+    speed: float = 1.0
 
     def as_dict(self):
         return {
@@ -169,6 +176,7 @@ class SampleResult:
             "shifted": self.shifted,
             "archived": str(self.archived) if self.archived else None,
             "card_path": str(self.card_path) if self.card_path else None,
+            "speed": self.speed,
         }
 
 
@@ -210,6 +218,48 @@ def parse_time(value):
         return float(minutes * 60 + seconds)
     hours, minutes, seconds = numbers
     return float(hours * 3600 + minutes * 60 + seconds)
+
+
+def validate_speed(value):
+    """Return a playback rate as a float, or raise :class:`ValueError`.
+
+    The accepted range is what a player offers, 0.25x to 2x. ``None`` means
+    normal speed, which is also what an old request without the field means.
+    """
+    if value is None:
+        return 1.0
+    if isinstance(value, bool):
+        raise ValueError(f"invalid speed {value!r}")
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid speed {value!r}: not a number") from None
+    if not math.isfinite(speed) or not (MIN_SPEED <= speed <= MAX_SPEED):
+        raise ValueError(
+            f"invalid speed {speed:g}: outside {MIN_SPEED:g}x-{MAX_SPEED:g}x"
+        )
+    return speed
+
+
+def atempo_chain(speed):
+    """ffmpeg filters that turn the source into the speed that was heard.
+
+    ``atempo`` accepts one stage per 0.5x-2x step, so 0.25x is two halves. At
+    1x nothing is added: a needless resample costs accuracy for no reason.
+    """
+    speed = validate_speed(speed)
+    if abs(speed - 1.0) < 1e-9:
+        return []
+    stages = []
+    remaining = speed
+    while remaining < 0.5 - 1e-9:
+        stages.append(0.5)
+        remaining /= 0.5
+    while remaining > 2.0 + 1e-9:
+        stages.append(2.0)
+        remaining /= 2.0
+    stages.append(remaining)
+    return [f"atempo={stage:.6g}" for stage in stages]
 
 
 def deck_slot(is_deck_a):
@@ -517,14 +567,24 @@ def ensure_source(url, cache_dir, source=None):
     return downloaded[0], sid
 
 
+def wav_seconds(path):
+    """Length of a plain Spotykach WAV, counted from its data chunk."""
+    size = Path(path).stat().st_size
+    frames = max(size - PLAIN_WAV_HEADER, 0) / (4 * wb.CHANNELS)
+    return frames / wb.SAMPLE_RATE
+
+
 def extract_segment(src, dst, start, seconds):
     """Cut ``[start, start+seconds)`` and write a native Spotykach WAV.
+
+    No speed is applied here: this is the plain slice, capped at the deck's
+    loop length. :func:`retime_segment` is the pass that re-times it.
 
     Enforces the deck's loop ceiling here as well as in :func:`build_sample`, so
     a direct library call cannot produce a file the hardware would silently cut.
     """
     src, dst = Path(src), Path(dst)
-    if seconds > MAX_LOOP_SECONDS:
+    if seconds > MAX_LOOP_SECONDS + 1e-9:
         raise ValueError(
             f"segment is {seconds:g}s; a deck holds {MAX_LOOP_SECONDS:g}s max"
         )
@@ -551,16 +611,80 @@ def extract_segment(src, dst, start, seconds):
 
     # A start time past the end of the source makes ffmpeg write a header with
     # no samples. That loads on the Spotykach as silence, so refuse it.
-    size = dst.stat().st_size
-    frame_bytes = 4 * wb.CHANNELS
-    frames = max(size - PLAIN_WAV_HEADER, 0) / frame_bytes
-    got = frames / wb.SAMPLE_RATE
+    got = wav_seconds(dst)
     if got < seconds - max(0.25, seconds * 0.01):
         dst.unlink(missing_ok=True)
         raise RuntimeError(
             f"source is shorter than the requested range: asked for "
             f"{seconds:.2f}s from {start:.2f}s, got {got:.2f}s (empty or "
             f"truncated segment)"
+        )
+    return dst
+
+
+def retime_video_filter(speed):
+    """The ``setpts`` expression for a speed, for callers that keep video.
+
+    ``setpts`` scales timestamps, so a clip that should last ``1/speed`` as
+    long multiplies them by ``1/speed``: 0.5x (heard slow) needs 2*PTS. The
+    naive ``0.5*PTS`` would halve the length and play twice as fast.
+    """
+    speed = validate_speed(speed)
+    return f"setpts={1.0 / speed:.6g}*PTS"
+
+
+def retime_segment(src, dst, speed):
+    """Re-record ``src`` at ``speed``, writing the sample the deck stores.
+
+    A second ffmpeg pass over the already-sliced segment, exactly like
+    ``ffmpeg -i in -filter setpts=... out`` for a video: nothing about the cut
+    changes, only how long the result lasts. ``atempo`` is the audio twin of
+    ``setpts`` — ``atempo=s`` and ``setpts=PTS/s`` stretch a clip identically —
+    and it is what applies here because a Spotykach sample is a bare 48 kHz
+    float WAV with no video stream.
+
+    1x copies the cut through untouched: no resample, no generation loss.
+    """
+    src, dst = Path(src), Path(dst)
+    speed = validate_speed(speed)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    if abs(speed - 1.0) < 1e-9:
+        if src.resolve() != dst.resolve():
+            shutil.copyfile(src, dst)
+        return dst
+
+    seconds = wav_seconds(src)
+    plays = seconds / speed
+    if plays > MAX_LOOP_SECONDS + 1e-9:
+        raise ValueError(
+            f"{seconds:g}s at {speed:g}x plays for {plays:.2f}s; a deck holds "
+            f"{MAX_LOOP_SECONDS:g}s max — shorten the range or raise the speed"
+        )
+
+    rough = dst.with_name(dst.stem + ".retime.wav")
+    cmd = [
+        wb.ffmpeg(), "-y", "-loglevel", "error",
+        "-i", str(src),
+        "-af", ",".join(atempo_chain(speed)),
+        "-c:a", wb.PCM_FMT, "-ar", str(wb.SAMPLE_RATE), "-ac", str(wb.CHANNELS),
+        str(rough),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {result.stderr.strip()}")
+
+    try:
+        wb.convert(rough, dst)
+    finally:
+        rough.unlink(missing_ok=True)
+
+    got = wav_seconds(dst)
+    if got < plays - max(0.25, plays * 0.01):
+        dst.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"re-timed {seconds:.2f}s at {speed:g}x, expected {plays:.2f}s, "
+            f"got {got:.2f}s"
         )
     return dst
 
@@ -624,12 +748,16 @@ def status_report(card=None, search_roots=None):
 
 def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
                  search_roots=None, install=True, source=None, transport=None,
-                 tape=None, archive_dir=None):
+                 tape=None, archive_dir=None, speed=1.0):
     """Build a segment and (by default) install it on the instrument.
 
     ``start``/``end`` accept ``SS``/``MM:SS``/``HH:MM:SS``. When ``url`` is an
     existing local file the download step is skipped, which is what the tests
     use and what makes offline use possible.
+
+    ``speed`` is the playback rate the range was heard at (0.25x-2x, 1x
+    default). It is applied as a second pass over the sliced segment, so the
+    deck receives an ordinary normal-speed WAV — just a longer or shorter one.
 
     The transport is chosen before anything is downloaded: USB first, the card
     second, unless ``transport`` names one (``auto``/``usb``/``card``).
@@ -639,9 +767,16 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
     if end_s <= start_s:
         raise ValueError(f"end ({end_s:g}s) must be after start ({start_s:g}s)")
     duration = end_s - start_s
+    speed = validate_speed(speed)
     if duration > MAX_LOOP_SECONDS:
         raise ValueError(
             f"segment is {duration:g}s; a deck holds {MAX_LOOP_SECONDS:g}s max"
+        )
+    plays = duration / speed
+    if plays > MAX_LOOP_SECONDS + 1e-9:
+        raise ValueError(
+            f"{duration:g}s at {speed:g}x plays for {plays:.2f}s; a deck holds "
+            f"{MAX_LOOP_SECONDS:g}s max — shorten the range or raise the speed"
         )
 
     target_tape = (tape or DEFAULT_TAPE).upper()
@@ -674,13 +809,21 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
 
     media, sid = ensure_source(url, cache, source=source)
     label = sid or Path(media).stem
-    segment = cache / "segments" / f"{label}_{int(start_s)}-{int(end_s)}.WAV"
-    extract_segment(media, segment, start_s, duration)
+    rate_tag = "" if abs(speed - 1.0) < 1e-9 else f"_{speed:g}x"
+    segment = cache / "segments" / f"{label}_{int(start_s)}-{int(end_s)}{rate_tag}.WAV"
+    # Slice, then re-record: the cut is always exactly the picked range, and
+    # the speed only decides how long the deck's copy of it lasts.
+    cut = segment.with_name(segment.stem + ".cut.WAV")
+    try:
+        extract_segment(media, cut, start_s, duration)
+        retime_segment(cut, segment, speed)
+    finally:
+        cut.unlink(missing_ok=True)
 
     result = SampleResult(
         source=str(url), source_id=sid, start=start_s, end=end_s,
         deck="A" if is_deck_a else "B", tape=target_tape, slot=1,
-        segment_path=segment, installed=False,
+        segment_path=segment, installed=False, speed=speed,
     )
     if not install:
         return result
@@ -771,6 +914,9 @@ def main(argv=None):
                              f"default {DEFAULT_TAPE})")
     parser.add_argument("--transport", choices=["auto", "usb", "card"], default="auto",
                         help="delivery path (default auto: usb, then card)")
+    parser.add_argument("--speed", type=float, default=1.0,
+                        help="playback rate the range was heard at "
+                             f"({MIN_SPEED:g}-{MAX_SPEED:g}; default 1.0)")
     parser.add_argument("--card", help="card mount point (auto-detected if omitted)")
     parser.add_argument("--cache-dir", help=f"download cache (default {DEFAULT_CACHE})")
     parser.add_argument("--archive-dir", help="where samples that fall off a tape go")
@@ -804,6 +950,7 @@ def main(argv=None):
             args.url, args.start, args.end, args.deck == "a",
             card=args.card, cache_dir=args.cache_dir, source=args.source,
             transport=args.transport, tape=args.tape, archive_dir=args.archive_dir,
+            speed=args.speed,
         )
     except (ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
@@ -814,7 +961,8 @@ def main(argv=None):
     else:
         print(f"deck {result.deck} | tape {result.tape} slot {result.slot}"
               f" via {result.transport}")
-        print(f"segment: {result.segment_path} ({result.end - result.start:g}s)")
+        print(f"segment: {result.segment_path} ({result.end - result.start:g}s"
+              f"{'' if abs(result.speed - 1) < 1e-9 else f' at {result.speed:g}x'})")
         print(f"installed: yes, verified"
               f"{' (shifted ' + str(result.shifted) + ' slots)' if result.shifted else ''}")
         if result.archived:

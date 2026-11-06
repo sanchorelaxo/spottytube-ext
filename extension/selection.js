@@ -7,6 +7,9 @@
 
   var MAX_LOOP = 42; // seconds; mirrors sample_tool.MAX_LOOP_SECONDS
 
+  // The cap is on the range you pick and it does not move with the speed. A
+  // slowed range can still overflow the 42 s the deck stores, but that check
+  // belongs to whoever knows the speed, not here.
   function createPair() {
     var start = null;
     var end = null;

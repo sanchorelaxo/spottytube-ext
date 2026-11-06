@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import queue
 import secrets
@@ -41,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
 
-VERSION = "1.0.0"
+VERSION = "0.1.1"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 # The tool ships with the project (tools/sample_tool.py + tools/wav_builder.py
@@ -54,6 +55,10 @@ DEFAULT_TOOL = PROJECT_ROOT / "tools" / "sample_tool.py"
 # Mirrors sample_tool.MAX_LOOP_SECONDS. Checked here so an impossible range
 # costs a 400 instead of a download.
 MAX_LOOP_SECONDS = 42.0
+# Mirrors sample_tool.MIN_SPEED / MAX_SPEED: the rates a player offers. A
+# slowed-down sample is longer than the range, so the ceiling depends on it.
+MIN_SPEED = 0.25
+MAX_SPEED = 2.0
 JOB_TIMEOUT_SECONDS = 900
 MAX_BODY_BYTES = 64 * 1024
 
@@ -234,6 +239,7 @@ def _validate(body):
     source = str(body.get("source", "") or "").strip().lower() or None
     transport = str(body.get("transport", "") or "").strip().lower() or None
     tape = str(body.get("tape", "") or "").strip().upper() or None
+    raw_speed = body.get("speed", 1.0)
 
     if not url.startswith(("http://", "https://")):
         return None, "url must be an http(s) URL"
@@ -241,6 +247,19 @@ def _validate(body):
         return None, "deck must be 'a' or 'b'"
     if transport is not None and transport not in ("auto", "usb", "card"):
         return None, "transport must be 'auto', 'usb' or 'card'"
+
+    try:
+        if isinstance(raw_speed, bool):
+            raise ValueError
+        speed = float(1.0 if raw_speed is None else raw_speed)
+        if not math.isfinite(speed):
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, (f"speed must be a number between {MIN_SPEED:g} and "
+                      f"{MAX_SPEED:g}")
+    if not (MIN_SPEED <= speed <= MAX_SPEED):
+        return None, (f"speed {speed:g} is outside {MIN_SPEED:g}x-{MAX_SPEED:g}x")
+
     for name, value in (("start", start), ("end", end)):
         if not value:
             return None, f"{name} is required"
@@ -254,10 +273,14 @@ def _validate(body):
     if end_s - start_s > MAX_LOOP_SECONDS:
         return None, (f"segment is {end_s - start_s:g}s; a deck holds "
                       f"{MAX_LOOP_SECONDS:g}s max")
+    plays = (end_s - start_s) / speed
+    if plays > MAX_LOOP_SECONDS:
+        return None, (f"{end_s - start_s:g}s at {speed:g}x plays for "
+                      f"{plays:.2f}s; a deck holds {MAX_LOOP_SECONDS:g}s max")
 
     return {
         "url": url, "start": start, "end": end, "deck": deck,
-        "source": source, "transport": transport, "tape": tape,
+        "source": source, "transport": transport, "tape": tape, "speed": speed,
     }, None
 
 
@@ -423,6 +446,9 @@ class Handler(BaseHTTPRequestHandler):
                           ("--tape", "tape")):
             if payload.get(key):
                 argv += [flag, payload[key]]
+        # 1x is the tool's default, so the flag only appears when it differs.
+        if payload["speed"] != 1.0:
+            argv += ["--speed", f"{payload['speed']:g}"]
         job_id = store.submit(argv, payload)
         self._send(202, {"ok": True, "job_id": job_id, "meta": payload})
 

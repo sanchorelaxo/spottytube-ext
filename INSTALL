@@ -82,6 +82,12 @@ Open any video page. A small SpottyTube panel appears in the bottom right.
 If the panel does not appear, reload the page once. The widget is added when a
 page loads, so it is not there on pages that were already open.
 
+If you are updating an extension you already loaded: open the extensions page
+(chrome://extensions or brave://extensions), find SpottyTube and press the
+reload arrow on its card. Then reload your video page. The panel title shows
+the version it is running (0.1.1 adds the speed slider), so you can tell an
+old copy from a new one.
+
 Step 5 - pick your browser (optional)
 -------------------------------------
 
