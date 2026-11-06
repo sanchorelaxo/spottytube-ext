@@ -5,8 +5,8 @@
 
 ![SpottyTube panel on a YouTube video](spotty_screen.png)
 
-A browser extension (Chrome / Brave, Manifest V3) that puts a small panel on a
-video page and hands the video URL plus a start/end range to
+A browser extension (Chrome / Brave / Chromium, Manifest V3) that puts a small
+panel on a video page and hands the video URL plus a start/end range to
 `tools/sample_tool.py`, which cuts the clip and puts it on a Spotykach tape.
 
 A browser cannot start a process, so this is two pieces:
@@ -24,8 +24,11 @@ instead. The widget shows a red dot when neither is possible.
 
 ## Install
 
+Novices: read [INSTALL](INSTALL), which walks through it step by step.
+
     cd ~/Documents/git/spottytube-ext
-    ./install.sh
+    ./install.sh                     every Chrome, Brave or Chromium found
+    ./install-chrome.sh              Chrome only (or --browser brave|chromium)
 
 That links `~/.local/bin/spottytube-bridge`, fetches `tools/wav_builder.py`,
 writes `~/.config/systemd/user/spottytube-bridge.service`, starts it and waits
@@ -37,13 +40,23 @@ downloads it. The fetcher checks the API this project uses before replacing a
 working copy, so a bad download cannot break an install. `WAV_BUILDER_URL`
 overrides the source for an offline clone.
 
-Then in Brave: `brave://extensions` -> Developer mode -> Load unpacked ->
-`~/Documents/git/spottytube-ext/extension`.
+Browser detection lives in `installers/browsers.sh` and finds native packages,
+snaps and Flatpaks by executable name; when the same name exists twice, PATH
+order decides, exactly as it would if you typed the command. `--browser` takes
+`chrome`, `brave`, `chromium`, `auto` (the default) or a comma separated list,
+and an unknown name is an error rather than a silent no-op.
 
-If Brave came from Flatpak, `install.sh` also runs
-`flatpak override --user --filesystem=<this repo>:ro com.brave.Browser`.
-Without it the sandbox cannot see `~/Documents` and "Load unpacked" fails with
-no message at all. Restart Brave after the first install for it to take effect.
+Then load the extension: `chrome://extensions` (Chrome, Chromium) or
+`brave://extensions` (Brave) -> Developer mode -> Load unpacked ->
+`~/Documents/git/spottytube-ext/extension`. The installer prints these lines for
+the browsers it actually found.
+
+If a browser came from Flatpak, `install.sh` also runs
+`flatpak override --user --filesystem=<this repo>:ro <app-id>` for each Flatpak
+browser it found (`com.google.Chrome`, `com.brave.Browser`,
+`org.chromium.Chromium`). Without it the sandbox cannot see `~/Documents` and
+"Load unpacked" fails with no message at all. Restart that browser after the
+first install for it to take effect.
 
 The Flatpak build shares the network namespace, so it reaches
 127.0.0.1:8765 normally.
@@ -123,7 +136,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -v            # 67 python tests
+    python3 -m unittest discover -s tests -v            # 87 python tests
     node --test tests/test_selection.mjs                # 9 state-machine tests
 
 - `tests/test_bridge.py` — 24 tests, real HTTP against `tests/stub_tool.py`, so
@@ -131,6 +144,11 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 - `tests/test_sample_tool.py` — 31 tests: time parsing, generic source ids,
   transport choice, and the slot shift against a real directory tree (shift,
   archive, read-back check, partial tapes, untouched neighbours).
+- `tests/test_install_browsers.py` — 20 tests: browser detection and filtering
+  run under a throwaway PATH of stub executables, so no browser on the machine
+  leaks into a result and no root is needed. Covers native, snap and Flatpak
+  Chrome/Brave/Chromium, the `--browser` contract, and the exit code for a name
+  that does not exist.
 - `tests/test_wav_builder_dep.py` — 12 tests: the fetcher rejects a bad
   download without clobbering a good copy, the upstream file still has the API
   this project calls, the installed copy matches upstream, and a real ffmpeg
@@ -155,9 +173,10 @@ card and fails loudly instead of falling back.
 Widget missing on a video: reload the page once after loading the extension;
 content scripts are injected at page load, not retroactively.
 
-"Load unpacked" shows nothing / extension never appears (Flatpak Brave): the
+"Load unpacked" shows nothing / extension never appears (Flatpak browser): the
 sandbox cannot see `~/Documents`. Run `./install.sh` again (it grants a
-read-only override for this folder) and restart Brave.
+read-only override for this folder to every Flatpak browser it found) and
+restart that browser completely.
 
 `PermissionError` on `/recovery`: system vfat mounts that cannot be read are
 skipped instead of aborting the card scan.
@@ -165,6 +184,10 @@ skipped instead of aborting the card scan.
 ## Layout
 
     bridge/spottytube_bridge.py    HTTP bridge, stdlib only
+    install.sh                     installer: deps, link, service, browser setup
+    install-chrome.sh              Chrome entry point (install.sh --browser chrome)
+    installers/browsers.sh         native/snap/Flatpak detection, sourced by install.sh
+    INSTALL                        step by step guide for a first install
     tools/sample_tool.py           URL + range -> a slot on the instrument
     tools/sk_usb.py                USB transport (raw termios + amidi, stdlib)
     tools/sk_install.py            transport contract + slot shift + archive

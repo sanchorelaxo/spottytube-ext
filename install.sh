@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
 # SpottyTube installer: fetch deps, link the bridge, install a user service, start it.
-#
-#   ./install.sh                 install and start
-#   ./install.sh --port 8766     use another port (edit manifest too)
-#   ./install.sh --no-service    only link the binary
-#   ./install.sh --uninstall     stop and remove everything
-#
-# Idempotent: re-running rewrites the unit and restarts the service.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,25 +8,60 @@ UNIT_DIR="$HOME/.config/systemd/user"
 UNIT="$UNIT_DIR/spottytube-bridge.service"
 LINK="$BIN_DIR/spottytube-bridge"
 PORT="${SPOTTYTUBE_PORT:-8765}"
+BROWSER_SPEC="auto"
 DO_SERVICE=1
 DO_UNINSTALL=0
+
+# shellcheck source=installers/browsers.sh
+. "$ROOT/installers/browsers.sh"
+
+usage() {
+    cat <<'TXT'
+SpottyTube installer: fetch deps, link the bridge, install a user service, start it.
+
+  ./install.sh                     install and start (every browser found)
+  ./install.sh --browser chrome    only Chrome; brave, chromium, or a comma
+                                   list such as "chrome,brave" also work
+  ./install.sh --port 8766         use another port (edit manifest too)
+  ./install.sh --no-service        only link the binary
+  ./install.sh --uninstall         stop and remove everything
+
+Idempotent: re-running rewrites the unit and restarts the service.
+TXT
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --port) PORT="${2:?--port needs a value}"; shift 2 ;;
+        --browser) BROWSER_SPEC="${2:?--browser needs a value}"; shift 2 ;;
         --no-service) DO_SERVICE=0; shift ;;
         --uninstall) DO_UNINSTALL=1; shift ;;
-        -h|--help) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
+
+# Validate the browser choice before anything is written or started: a typo must
+# cost nothing.
+SELECTED="$(filter_browsers "$BROWSER_SPEC")" || exit 2
+if ! has_browsers "$BROWSER_SPEC" && [ "$BROWSER_SPEC" != auto ] && [ "$BROWSER_SPEC" != all ]; then
+    echo "warning: no $BROWSER_SPEC browser on PATH; installing the bridge only" >&2
+    echo "         the extension still loads, the steps are printed at the end" >&2
+fi
 
 if [ "$DO_UNINSTALL" = 1 ]; then
     systemctl --user disable --now spottytube-bridge.service 2>/dev/null || true
     rm -f "$UNIT" "$LINK"
     systemctl --user daemon-reload 2>/dev/null || true
     echo "removed: $UNIT, $LINK"
-    echo "the extension itself is still loaded in the browser — remove it at brave://extensions"
+    echo "the extension itself is still loaded in the browser — remove it at:"
+    if [ -n "$SELECTED" ]; then
+        echo "$SELECTED" | while IFS=$'\t' read -r family _ label; do
+            echo "  $label: $(browser_url "$family")"
+        done
+    else
+        echo "  chrome://extensions (Chrome, Chromium) or brave://extensions (Brave)"
+    fi
     exit 0
 fi
 
@@ -70,16 +98,21 @@ if [ ! -f "$ROOT/bridge/spottytube_bridge.py" ]; then
     exit 1
 fi
 
-# Flatpak Brave runs in a sandbox that only sees xdg-download, xdg-desktop and
+# Flatpak browsers run in a sandbox that only sees xdg-download, xdg-desktop and
 # /tmp by default, so "Load unpacked" from ~/Documents fails with no error at
-# all. Grant read-only access to this folder; harmless when Brave is not Flatpak.
-if flatpak info com.brave.Browser >/dev/null 2>&1; then
-    if flatpak info --show-permissions com.brave.Browser 2>/dev/null | grep -qF "$ROOT"; then
-        echo "flatpak: brave already sees $ROOT"
-    else
-        flatpak override --user --filesystem="$ROOT:ro" com.brave.Browser
-        echo "flatpak: granted brave read-only access to $ROOT (restart brave to apply)"
-    fi
+# all. Grant read-only access to this folder for every Flatpak browser the user
+# asked for; harmless when a browser is not Flatpak or not installed.
+if [ -n "$SELECTED" ]; then
+    while IFS=$'\t' read -r family kind label; do
+        [ "$kind" = flatpak ] || continue
+        APP="$(flatpak_app "$family")"
+        if flatpak info --show-permissions "$APP" 2>/dev/null | grep -qF "$ROOT"; then
+            echo "flatpak: $label already sees $ROOT"
+        else
+            flatpak override --user --filesystem="$ROOT:ro" "$APP"
+            echo "flatpak: granted $label read-only access to $ROOT (restart $label to apply)"
+        fi
+    done <<< "$SELECTED"
 fi
 
 if [ "$DO_SERVICE" = 1 ]; then
@@ -129,11 +162,25 @@ fi
 
 cat <<EOF
 
-Load the extension (Brave or Chrome):
-  1. open brave://extensions  (chrome://extensions)
-  2. turn on Developer mode
-  3. Load unpacked -> $ROOT/extension
-  4. open any YouTube video; the SpottyTube panel sits bottom right
+Load the extension (Chrome, Brave and Chromium all work):
+EOF
+if [ -n "$SELECTED" ]; then
+    while IFS=$'\t' read -r family _ label; do
+        printf '  %s\n    1. open %s\n    2. turn on Developer mode\n    3. Load unpacked -> %s/extension\n' \
+            "$label" "$(browser_url "$family")" "$ROOT"
+    done <<< "$SELECTED"
+else
+    cat <<EOF
+  no Chrome, Brave or Chromium was found on PATH; in the browser you use
+    1. open chrome://extensions (Brave: brave://extensions)
+    2. turn on Developer mode
+    3. Load unpacked -> $ROOT/extension
+EOF
+fi
+
+cat <<EOF
+
+Then open any video page; the SpottyTube panel sits bottom right.
 
 Service: systemctl --user status spottytube-bridge
 Logs:    journalctl --user -u spottytube-bridge -f

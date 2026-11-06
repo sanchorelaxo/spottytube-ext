@@ -1,0 +1,161 @@
+SpottyTube - install guide
+==========================
+
+This walks through a first install on Linux. It assumes you can open a terminal
+and paste a command. Nothing here needs root.
+
+You need:
+
+  - Google Chrome, Brave, or Chromium (any of them, already working)
+  - Python 3.9 or newer        check with: python3 --version
+  - ffmpeg                     check with: ffmpeg -version
+
+If one of those is missing on Ubuntu or Debian:
+
+  sudo apt install python3 ffmpeg
+
+Step 1 - get the folder
+-----------------------
+
+Put this project anywhere in your home folder. The examples use:
+
+  ~/Documents/git/spottytube-ext
+
+If you downloaded a ZIP instead of cloning, unzip it and move the folder so the
+path matches, or just remember your real path: everything below works with any
+path, you only have to type yours instead.
+
+Step 2 - run the installer
+--------------------------
+
+  cd ~/Documents/git/spottytube-ext
+  ./install.sh
+
+If you get "Permission denied", the file lost its executable bit (this happens
+after unzipping on some systems). Fix it once:
+
+  chmod +x install.sh install-chrome.sh
+
+What the installer does, in plain words:
+
+  - links a small command called spottytube-bridge into ~/.local/bin
+  - downloads one Python file the tool needs (tools/wav_builder.py)
+  - writes a user service so the bridge starts with your session
+  - starts it and checks that it answers
+
+You should end with three lines like:
+
+  wrote   ~/.config/systemd/user/spottytube-bridge.service
+  started spottytube-bridge on port 8765
+  health: bridge answering
+
+Running ./install.sh again later is safe. It rewrites the same files.
+
+Step 3 - load the extension in your browser
+-------------------------------------------
+
+The installer prints the exact lines for the browsers it found. In short:
+
+  Chrome or Chromium
+    1. type chrome://extensions in the address bar, press Enter
+    2. turn on "Developer mode" (top right)
+    3. click "Load unpacked"
+    4. choose the "extension" folder inside this project
+
+  Brave
+    1. type brave://extensions in the address bar, press Enter
+    2. turn on "Developer mode" (top right)
+    3. click "Load unpacked"
+    4. choose the "extension" folder inside this project
+
+Choose the folder named extension, not the project folder above it. The
+extension folder is the one that contains manifest.json.
+
+Step 4 - check that it works
+----------------------------
+
+Open any video page. A small SpottyTube panel appears in the bottom right.
+
+  green dot   the bridge is up and something can take a sample
+  red dot     no bridge, or no instrument and no card to write to
+
+If the panel does not appear, reload the page once. The widget is added when a
+page loads, so it is not there on pages that were already open.
+
+Step 5 - pick your browser (optional)
+-------------------------------------
+
+Plain ./install.sh handles whichever browsers it finds. If you want to be
+explicit:
+
+  ./install-chrome.sh              same as: ./install.sh --browser chrome
+  ./install.sh --browser brave
+  ./install.sh --browser chromium
+  ./install.sh --browser chrome,brave
+
+If you ask for a browser that is not installed, the installer says so and still
+sets up the bridge, because the bridge does not care which browser you use.
+
+Flatpak browsers (a normal install from Flathub, not a .deb)
+------------------------------------------------------------
+
+A Flatpak browser runs in a sandbox and cannot see your home folder, so
+"Load unpacked" silently does nothing. The installer grants read-only access to
+this project folder for every Flatpak browser it detects. It prints:
+
+  flatpak: granted Google Chrome read-only access to /path/to/spottytube-ext
+
+Close the browser completely and open it again after the first install. That is
+the step people miss.
+
+Snap browsers work as-is; nothing extra to do.
+
+Common problems
+---------------
+
+"flatpak: command not found" - harmless. It only means you have no Flatpak
+browsers, and the installer skips that part.
+
+"warning: no chrome browser on PATH" - Chrome is not installed, or it is
+installed in a way that does not put google-chrome on your PATH. Install it
+normally (deb/rpm from Google) or use a different browser. The bridge is set up
+regardless.
+
+The extension loads but the panel shows a red dot - the bridge or the instrument
+is not reachable. Check the bridge:
+
+  systemctl --user status spottytube-bridge
+  curl http://127.0.0.1:8765/status
+
+/status names what it is missing (usb, card). Plug the instrument in over USB,
+or mount its card, and the panel turns green within 20 seconds.
+
+Changing the port
+-----------------
+
+The extension expects port 8765. If you must change it:
+
+  ./install.sh --port 8766
+
+then edit two places to match: extension/manifest.json (host_permissions) and
+BASE in extension/background.js. Reload the extension afterwards.
+
+Removing everything
+-------------------
+
+  ./install.sh --uninstall
+
+That stops and deletes the service and the command link. The extension stays in
+your browser until you remove it yourself at chrome://extensions or
+brave://extensions. The project folder is untouched; delete it whenever you
+like.
+
+Where things live
+-----------------
+
+  ~/.config/systemd/user/spottytube-bridge.service   the service
+  ~/.local/bin/spottytube-bridge                     the command
+  journalctl --user -u spottytube-bridge -f          live log
+
+The longer story, including the widget controls, the slot order and the bridge
+API, is in README.md.
