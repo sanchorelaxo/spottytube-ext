@@ -25,6 +25,7 @@ driven through alsa-utils' ``amidi``, which every ALSA install ships.
 
 from __future__ import annotations
 
+import errno
 import glob
 import os
 import re
@@ -89,6 +90,9 @@ UPLOAD_DATA_TIMEOUT = 4.0
 REQUEST_TIMEOUT = 5.0
 DEVICE_QUIET = 0.25
 
+# How long a write may make no progress before the port is called dead.
+WRITE_STALL = 5.0
+
 DEVICE_FORMAT = {"sample_rate": 48000, "channels": 2, "bits": 32, "format": 3}
 
 
@@ -107,6 +111,26 @@ class DeviceError(RuntimeError):
 
 class TransferTimeout(RuntimeError):
     """No complete reply in time."""
+
+
+class TransferDropped(DeviceError):
+    """The device left transfer mode under an open port.
+
+    The firmware goes back to its MIDI-only USB identity when nobody talks to
+    it for a while, and the tty node leaves with it. The next write then lands
+    on a device that is no longer there; from the host that is ``errno.EIO``.
+    """
+
+
+# What a vanished tty looks like when you write to it anyway.
+DROP_ERRNOS = (errno.EIO, errno.ENXIO, errno.ENODEV, errno.EBADF)
+
+
+def _dropped(exc):
+    detail = exc.strerror or str(exc)
+    return TransferDropped(
+        0, message=(f"Spotykach left transfer mode ({detail}) — it goes back on "
+                    f"its own after a few seconds of silence; send again"))
 
 
 # --- locating the device --------------------------------------------------
@@ -280,12 +304,21 @@ class SerialPort:
 
     def write(self, data):
         view = memoryview(data)
+        stalled = time.monotonic() + WRITE_STALL
         while view:
             try:
                 written = os.write(self.fd, view)
             except BlockingIOError:
+                if time.monotonic() > stalled:
+                    raise TransferTimeout("spotykach stopped taking bytes")
                 select.select([], [self.fd], [], 1.0)
                 continue
+            except OSError as exc:
+                if exc.errno in DROP_ERRNOS:
+                    raise _dropped(exc) from exc
+                raise
+            if written:
+                stalled = time.monotonic() + WRITE_STALL
             view = view[written:]
 
     def read(self, seconds):
@@ -296,6 +329,10 @@ class SerialPort:
             return os.read(self.fd, 65536)
         except BlockingIOError:
             return b""
+        except OSError as exc:
+            if exc.errno in DROP_ERRNOS:
+                raise _dropped(exc) from exc
+            raise
 
     def close(self):
         if self.fd >= 0:
@@ -601,7 +638,7 @@ def check_uploadable(data, info):
 
 __all__ = [
     "CMD", "DeviceError", "DeviceInfo", "DeviceNotFound", "SerialPort", "SkLink",
-    "SlotInfo", "TransferTimeout", "build_frame", "check_uploadable",
+    "SlotInfo", "TransferDropped", "TransferTimeout", "build_frame", "check_uploadable",
     "enter_transfer_mode", "find_midi_port", "find_serial_port", "inspect_wav",
     "parse_frames", "parse_sysex_reply",
 ]

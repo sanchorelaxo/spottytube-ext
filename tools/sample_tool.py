@@ -53,6 +53,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -746,6 +747,50 @@ def status_report(card=None, search_roots=None):
     return report
 
 
+def _plausible(transport, card_root):
+    """Is there anything to deliver to? Presence only — never switches mode."""
+    preferred = (transport or "auto").lower()
+    if preferred in ("auto", "usb"):
+        if (sk_install.sk_usb.find_serial_port(wait=0.0)
+                or sk_install.sk_usb.find_midi_port()):
+            return True
+        if preferred == "usb":
+            return False
+    if preferred in ("auto", "card") and card_root is not None:
+        return (Path(card_root) / "SK").is_dir()
+    return False
+
+
+def deliver(transport, card_root, tape, data, archive_dir, split=True, attempts=2):
+    """Open a transport and put ``data`` on ``tape``, opening it late.
+
+    The unit leaves transfer mode on its own after a few seconds of silence, so
+    the transport is opened here, immediately before the write, and never held
+    across a download and an ffmpeg pass. A drop before anything reached the
+    tape is retried once: the tape is still untouched, so starting over is
+    safe. A drop after a write is not retried — the shift is not idempotent.
+    """
+    last = None
+    for attempt in range(attempts):
+        try:
+            chosen = sk_install.open_transport(
+                transport or "auto", card_root=card_root, archive_dir=archive_dir)
+        except sk_install.NoTransport as error:
+            raise TransportMissing(
+                "cannot deliver the sample — " + "; ".join(error.reasons)) from None
+        try:
+            return sk_install.install_sample(
+                chosen, tape, data, archive_dir=archive_dir, shift=split)
+        except sk_install.sk_usb.TransferDropped as error:
+            last = error
+            if getattr(chosen, "wrote", False) or attempt + 1 >= attempts:
+                raise
+            time.sleep(0.5)
+        finally:
+            chosen.close()
+    raise last
+
+
 def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
                  search_roots=None, install=True, source=None, transport=None,
                  tape=None, archive_dir=None, speed=1.0):
@@ -759,8 +804,10 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
     default). It is applied as a second pass over the sliced segment, so the
     deck receives an ordinary normal-speed WAV — just a longer or shorter one.
 
-    The transport is chosen before anything is downloaded: USB first, the card
-    second, unless ``transport`` names one (``auto``/``usb``/``card``).
+    Which transport will take the sample is checked before anything is
+    downloaded, but the transport itself is opened only once the slice exists:
+    the unit leaves transfer mode on its own after a few seconds of silence.
+    USB first, the card second, unless ``transport`` names one.
     """
     start_s = parse_time(start)
     end_s = parse_time(end)
@@ -787,7 +834,6 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
     cache = Path(cache_dir) if cache_dir else DEFAULT_CACHE
     archive = archive_dir or archive_target(card, cache)
 
-    chosen = None
     card_root = None
     if install:
         if card is not None or (transport or "auto").lower() in ("auto", "card"):
@@ -797,15 +843,18 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
                 card_root = None
                 if (transport or "auto").lower() == "card":
                     raise
-        try:
-            chosen = sk_install.open_transport(
-                transport or "auto", card_root=card_root,
-                archive_dir=archive,
-            )
-        except sk_install.NoTransport as error:
-            raise TransportMissing(
-                "cannot deliver the sample — " + "; ".join(error.reasons)
-            ) from None
+        # Nothing plugged in should be said now, not after the download. Only
+        # presence is checked here: opening the transport means switching the
+        # unit into transfer mode, and it does not stay there while we work.
+        if not _plausible(transport, card_root):
+            try:
+                sk_install.open_transport(
+                    transport or "auto", card_root=card_root, archive_dir=archive
+                ).close()
+            except sk_install.NoTransport as error:
+                raise TransportMissing(
+                    "cannot deliver the sample — " + "; ".join(error.reasons)
+                ) from None
 
     media, sid = ensure_source(url, cache, source=source)
     label = sid or Path(media).stem
@@ -828,15 +877,16 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
     if not install:
         return result
 
-    placement = sk_install.install_sample(
-        chosen, target_tape, segment.read_bytes(), archive_dir=archive,
+    placement = deliver(
+        transport, card_root, target_tape, segment.read_bytes(), archive,
     )
     result.installed = True
     result.transport = placement.transport
     result.shifted = placement.shifted
     result.archived = placement.archived
     if placement.transport == "card":
-        result.card_path = Path(chosen.slot_path(target_tape, placement.slot))
+        result.card_path = sk_install.CardTransport(card_root).slot_path(
+            target_tape, placement.slot)
     return result
 
 

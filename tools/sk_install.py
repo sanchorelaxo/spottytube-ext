@@ -91,6 +91,10 @@ class CardTransport:
             raise InstallError(f"{self.root} has no SK/ folder — not a Spotykach card")
         self.archive_dir = self.sk
 
+    def close(self):
+        """Nothing is held open: slots are files."""
+        self.wrote = getattr(self, "wrote", False)
+
     def slot_path(self, tape, slot):
         return self.sk / tape / f"{slot}.WAV"
 
@@ -132,6 +136,7 @@ class UsbTransport:
 
     def __init__(self, link, archive_dir=None):
         self.link = link
+        self.wrote = False        # anything on the tape makes a retry unsafe
         info = link.info or link.hello()
         self.tape_names = info.tape_names
         self.archive_dir = Path(archive_dir) if archive_dir else None
@@ -155,6 +160,7 @@ class UsbTransport:
         return self.link.download(index, slot - 1)
 
     def write(self, tape, slot, data):
+        self.wrote = True
         self.link.upload(self._tape_index(tape), slot - 1, data)
 
     def clear(self, tape, slot):

@@ -31,6 +31,7 @@ def _load(name, filename):
 
 sample_tool = _load("sample_tool", "sample_tool.py")
 sk_install = _load("sk_install", "sk_install.py")
+sk_usb = _load("sk_usb", "sk_usb.py")
 
 
 def wav(seed, seconds=0.05, rate=48000, channels=2):
@@ -486,6 +487,109 @@ class TestSpeedCut(CardFixture):
                 "--deck", "a", "--speed", "3", "--json"])
         self.assertEqual(code, 1)
         self.assertIn("0.25", err.getvalue())
+
+
+class TestTransferDrop(CardFixture):
+    """The unit leaves transfer mode on its own; the host must cope.
+
+    Sample tool imports sk_install for itself, so these tests drive the same
+    module objects it holds rather than a second copy loaded here.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.install = sample_tool.sk_install
+        self.usb = sample_tool.sk_install.sk_usb
+
+    def test_a_vanished_device_reads_as_a_drop_not_an_errno(self):
+        master, slave = os.openpty()
+        path = os.ttyname(slave)
+        port = self.usb.SerialPort(path)
+        os.close(master)
+        os.close(slave)
+        with self.assertRaises(self.usb.TransferDropped) as caught:
+            for _ in range(200):
+                port.write(b"x" * 4096)
+        port.close()
+        self.assertNotIsInstance(caught.exception, OSError)
+        self.assertIn("transfer mode", str(caught.exception))
+
+    def test_the_unit_is_not_put_in_transfer_mode_before_the_slice_exists(self):
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=4))
+        seen = {}
+
+        def spy(*args, **kwargs):
+            segments = self.root / "cache" / "segments"
+            seen["slice_present"] = segments.is_dir() and any(segments.iterdir())
+            return self.install.CardTransport(self.root)
+
+        with mock.patch.object(self.install, "open_transport", spy):
+            sample_tool.build_sample(
+                str(source), "0:00", "0:02", True, card=self.root,
+                cache_dir=self.root / "cache", install=True, transport="card")
+
+        self.assertEqual(seen, {"slice_present": True})
+
+    def test_a_drop_before_any_write_is_retried_once(self):
+        usb = self.usb
+
+        class Dropper:
+            name = "usb"
+            wrote = False
+
+            def read(self, *args):
+                raise usb.TransferDropped(0, message="Spotykach left transfer mode")
+
+            def close(self):
+                pass
+
+        seen = []
+        install = self.install
+
+        def opener(*args, **kwargs):
+            seen.append(1)
+            if len(seen) == 1:
+                return Dropper()
+            return install.CardTransport(self.root)
+
+        data = wav(9)
+        with mock.patch.object(install, "open_transport", opener):
+            placement = sample_tool.deliver(
+                "usb", self.root, "B", data, self.root / "archive", split=True)
+
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(placement.slot, 1)
+        self.assertEqual(install.CardTransport(self.root).read("B", 1), data)
+
+    def test_a_drop_after_a_write_is_not_retried(self):
+        usb = self.usb
+
+        class Dropper:
+            name = "usb"
+            wrote = True
+
+            def read(self, *args):
+                raise usb.TransferDropped(0, message="Spotykach left transfer mode")
+
+            def write(self, *args):
+                raise AssertionError("must not start the shift over")
+
+            def close(self):
+                pass
+
+        seen = []
+
+        def opener(*args, **kwargs):
+            seen.append(1)
+            return Dropper()
+
+        with mock.patch.object(self.install, "open_transport", opener):
+            with self.assertRaises(usb.TransferDropped):
+                sample_tool.deliver(
+                    "usb", self.root, "B", wav(9), self.root / "archive", split=True)
+
+        self.assertEqual(len(seen), 1)
 
 
 if __name__ == "__main__":

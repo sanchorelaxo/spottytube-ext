@@ -143,20 +143,28 @@ next move, so an interruption leaves a duplicate rather than silence.
 Jobs run one at a time on purpose: two downloads would fight over the same
 cache and the same tape. A job lives as long as the service.
 
+The transport is opened after the slice exists, not before the download. A
+Spotykach in transfer mode falls back to its MIDI-only USB identity after a few
+seconds of silence, and the tty node leaves with it, so holding it open across a
+download plus an ffmpeg pass ends in `Input/output error` on the next write. If
+the unit drops anyway, the job is retried once as long as nothing has reached
+the tape yet; a drop after a write is reported instead, because the shift down
+a slot is not idempotent.
+
 Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 `chrome-extension://` origins; JSON POSTs only. Set `SPOTTYTUBE_TOKEN` (with
 `--token` in the unit) to also require `X-Spottytube-Token`.
 
 ## Tests
 
-    python3 -m unittest discover -s tests -v            # 112 python tests
+    python3 -m unittest discover -s tests -v            # 116 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
                 tests/test_widget_wiring.mjs            # 40 widget tests
 
 - `tests/test_bridge.py` — 29 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
-- `tests/test_sample_tool.py` — 51 tests: time parsing, generic source ids,
+- `tests/test_sample_tool.py` — 55 tests: time parsing, generic source ids,
   transport choice, the slot shift against a real directory tree (shift,
   archive, read-back check, partial tapes, untouched neighbours), and the
   speed cut, measured by decoding the WAVs ffmpeg actually produced.

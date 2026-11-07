@@ -42,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 # The tool ships with the project (tools/sample_tool.py + tools/wav_builder.py
