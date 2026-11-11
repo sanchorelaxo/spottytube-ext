@@ -94,3 +94,45 @@ test("the save mode survives a reload", () => {
   assert.match(content, /mode: ui\.mode, collapsed/);
   assert.match(content, /s\.mode === "append"/);
 });
+
+// --- countdown to the auto out-point ---------------------------------------
+
+test("the widget shows a countdown row, hidden until the in-point is picked", () => {
+  assert.match(content, /class="countdown" hidden/);
+  assert.match(content, /AUTO-END IN/);
+  assert.match(content, /renderCountdown\(/);
+});
+
+test("the countdown is armed by every action that selects an in-point", () => {
+  assert.match(content, /countdown\.arm\(Date\.now\(\)\)/);
+  const sync = content.slice(content.indexOf("function syncCountdown"));
+  assert.match(sync, /action === "start"/);
+  assert.match(sync, /action === "restart"/);
+  assert.match(sync, /action === "start-moved"/);
+  // a picked out-point or a reset stops the count
+  assert.match(sync, /countdown\.disarm\(\)/);
+});
+
+test("elapse with no out-point auto-clicks the player position as the end", () => {
+  assert.match(content, /function autoEnd\(/);
+  assert.match(content, /st\.expired/);
+  const fn = content.slice(content.indexOf("function autoEnd"), content.indexOf("function", content.indexOf("function autoEnd") + 10));
+  assert.match(fn, /pair\.click\(at\)/);        // same state machine as a manual SET END
+  assert.match(fn, /position\(\)/);             // the player's position at the elapse
+  assert.match(fn, /syncCountdown\(result\.action\)/);
+});
+
+test("the flash is model-driven, red, and only in the danger window", () => {
+  assert.match(content, /countdown\.tick\(Date\.now\(\)\)/);
+  assert.match(content, /classList\.toggle\("danger", st\.danger\)/);
+  assert.match(content, /classList\.toggle\("blink-off", st\.danger && !st\.flashOn\)/);
+  assert.match(content, /\.countdown\.danger output \{ color: #ff5252/);
+  assert.match(content, /\.countdown\.danger\.blink-off/);
+});
+
+test("the countdown ticker checks alive() and is cleared on teardown", () => {
+  assert.match(content, /cdTimer = setInterval\(tickCountdown/);
+  assert.match(content, /clearInterval\(cdTimer\)/);
+  const tick = content.slice(content.indexOf("function tickCountdown"));
+  assert.match(tick, /if \(!alive\(\)\)/);
+});

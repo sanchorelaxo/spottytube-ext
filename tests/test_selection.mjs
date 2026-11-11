@@ -17,7 +17,7 @@ function load() {
   return sandbox.window.SpottySelection;
 }
 
-const { createPair, MAX_LOOP } = load();
+const { createPair, createCountdown, MAX_LOOP, DANGER_SECONDS, FLASH_MS } = load();
 
 test("starts empty", () => {
   const s = JSON.parse(JSON.stringify(createPair().state()));
@@ -106,4 +106,86 @@ test("a missing playback position is rejected without changing state", () => {
     assert.equal(r.action, "rejected");
     assert.equal(r.start, 10);
   }
+});
+
+// --- countdown -------------------------------------------------------------
+// Armed when the in-point is picked; runs to zero on wall time; the last
+// DANGER_SECONDS flash every FLASH_MS; at zero the widget auto-ends.
+
+test("the countdown constants are the 5 s warning and the 500 ms flash", () => {
+  assert.equal(DANGER_SECONDS, 5);
+  assert.equal(FLASH_MS, 500);
+});
+
+test("the countdown is idle until armed", () => {
+  const cd = createCountdown();
+  assert.equal(cd.running(), false);
+  // JSON round-trip: objects minted inside the vm context have another
+  // Object.prototype, and strict deepEqual compares prototypes.
+  assert.deepEqual(JSON.parse(JSON.stringify(cd.tick(0))), {
+    running: false, remaining: null, expired: false, danger: false, flashOn: false
+  });
+});
+
+test("arming starts the count at the 42 s ceiling", () => {
+  const cd = createCountdown();
+  cd.arm(1000);
+  assert.equal(cd.running(), true);
+  const st = cd.tick(1000);
+  assert.equal(st.running, true);
+  assert.equal(st.remaining, MAX_LOOP);
+  assert.equal(st.expired, false);
+  assert.equal(st.danger, false);
+});
+
+test("the count decrements second by second and never goes negative", () => {
+  const cd = createCountdown();
+  cd.arm(0);
+  assert.equal(cd.tick(1000).remaining, MAX_LOOP - 1);
+  assert.equal(cd.tick(41000).remaining, 1);
+  assert.equal(cd.tick(41500).remaining, 1);   // ceil: "1" until the last second is up
+});
+
+test("the last 5 seconds are flagged danger, the rest are not", () => {
+  const cd = createCountdown();
+  cd.arm(0);
+  assert.equal(cd.tick(36000).danger, false);  // 6 s left
+  assert.equal(cd.tick(37000).danger, true);   // 5 s left
+  assert.equal(cd.tick(41900).danger, true);   // 0.1 s left
+});
+
+test("danger flashes: the phase flips every 500 ms, and only in danger", () => {
+  const cd = createCountdown();
+  cd.arm(0);
+  assert.equal(cd.tick(37000).flashOn, true);   // 5000 ms left: visible
+  assert.equal(cd.tick(37500).flashOn, false);  // 4500 ms left: hidden
+  assert.equal(cd.tick(38000).flashOn, true);   // 4000 ms left: visible
+  assert.equal(cd.tick(10000).flashOn, false);  // 32 s left: never flashes
+});
+
+test("at zero the countdown reports expired, and stays expired until disarmed", () => {
+  const cd = createCountdown();
+  cd.arm(0);
+  const st = cd.tick(42000);
+  assert.equal(st.expired, true);
+  assert.equal(st.remaining, 0);
+  assert.equal(st.danger, false);
+  assert.equal(st.flashOn, false);
+  assert.equal(cd.tick(50000).expired, true);
+});
+
+test("disarm stops the count", () => {
+  const cd = createCountdown();
+  cd.arm(0);
+  cd.disarm();
+  assert.equal(cd.running(), false);
+  assert.equal(cd.tick(10).running, false);
+});
+
+test("re-arming moves the deadline", () => {
+  const cd = createCountdown();
+  cd.arm(0);
+  cd.arm(10000);
+  assert.equal(cd.tick(10000).remaining, MAX_LOOP);
+  assert.equal(cd.tick(42000).remaining, 10);   // deadline is now 52000
 });

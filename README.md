@@ -89,6 +89,11 @@ pipeline needs no change).
 - **Hold the same button** (~0.5 s) to reset both indexes.
 - If you click behind the in-point, the in-point moves rather than producing an
   impossible range.
+- Once the in-point is picked, an **AUTO-END IN** countdown runs 42 s of wall
+  time; the last 5 s flash red every half second. If it reaches zero with no
+  out-point clicked, the player's position at the elapse becomes the out-point
+  automatically, exactly as if SET END had been pressed then. Picking an
+  out-point, holding to reset, or moving to another video stops the count.
 - **Bump / Append** picks where on the tape chain the sample lands (see Slot
   order below). The deck choice is gone: files live in the `B G P R T Y`
   directories, not on a deck. `--tape` picks the tape the chain starts at.
@@ -173,7 +178,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
     python3 -m unittest discover -s tests -v            # 129 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 43 widget tests
+                tests/test_widget_wiring.mjs            # 57 widget tests
 
 - `tests/test_bridge.py` — 32 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
@@ -193,10 +198,13 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
   cut converts to a 48 kHz stereo float32 WAV.
 - `tests/test_speed.mjs` — the speed model in a `vm` sandbox: clamping to
   0.25x-2x, the `1.00x` label, stored length, snap on/off, and restoring a
-  saved slider. `tests/test_widget_wiring.mjs` guards the contract between
+  saved slider. `tests/test_selection.mjs` covers the pair state machine and
+  the countdown model (decrement, 5 s danger window, 500 ms flash phase,
+  expiry). `tests/test_widget_wiring.mjs` guards the contract between
   `content.js` and the files it loads: script order in the manifest, the slider
   range, the snap control, `speed` in the sample payload, `playbackRate`
-  polling, and persistence.
+  polling, persistence, and the countdown wiring (arm on in-point, auto
+  out-point on elapse, flash classes, teardown).
 
 The two upstream tests skip themselves when GitHub is unreachable; everything
 local, including the ffmpeg conversion, always runs.
@@ -240,7 +248,7 @@ skipped instead of aborting the card scan.
     extension/manifest.json        MV3 content script
     extension/background.js        all fetches to the bridge happen here
     extension/content.js           the widget (shadow DOM, no page CSS leaks)
-    extension/selection.js         start/end state machine (tested in node)
+    extension/selection.js         start/end state machine + countdown (tested in node)
     extension/speed.js             playback-rate model (tested in node)
     tests/                         bridge, tool, dependency and widget tests
 

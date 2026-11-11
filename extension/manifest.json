@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SpottyTube",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Send a time range from a video page to a Spotykach deck through the local spottytube bridge.",
   "permissions": [
     "storage"

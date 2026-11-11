@@ -11,11 +11,13 @@
 
   const pair = window.SpottySelection.createPair();
   const MAX_LOOP = window.SpottySelection.MAX_LOOP;
+  const countdown = window.SpottySelection.createCountdown();
   const rate = window.SpottySpeed.create();
   const LONG_PRESS_MS = 550;
   const POLL_MS = 1200;
   const POLL_LIMIT_MS = 16 * 60 * 1000;
   const RATE_MS = 500;
+  const COUNTDOWN_MS = 200;
 
   const ui = { mode: "bump", collapsed: false, left: null, top: null,
              busy: false, timer: null, online: null, ready: false, transport: null };
@@ -94,6 +96,12 @@
       .cell.empty output { color: #4b5262; }
       .len output { color: #f5c451; }
       .len.over output { color: #ff6b6b; }
+      .countdown { display: flex; align-items: baseline; justify-content: center; gap: 6px; margin-top: -3px; }
+      .countdown .cdlabel { font-size: 9px; letter-spacing: .12em; color: #7d8494; }
+      .countdown output { font: 700 16px/1.2 ui-monospace, SFMono-Regular, monospace; color: #f0f1f4; }
+      .countdown.danger .cdlabel { color: #ff5252; }
+      .countdown.danger output { color: #ff5252; }
+      .countdown.danger.blink-off .cdlabel, .countdown.danger.blink-off output { visibility: hidden; }
       .set {
         all: unset; display: block; box-sizing: border-box; width: 100%; text-align: center;
         padding: 11px 8px; border-radius: 8px; cursor: pointer;
@@ -169,6 +177,7 @@
           <div class="cell empty" data-k="end"><label>END</label><output>&#8211;&#8211;</output></div>
           <div class="cell len"><label>LEN</label><output>&#8211;&#8211;</output></div>
         </div>
+        <div class="countdown" hidden><span class="cdlabel">AUTO-END IN</span><output>42s</output></div>
         <button class="set">SET START</button>
         <div class="hint">click: start, then end &middot; hold: reset</div>
         <div class="moderow">
@@ -201,6 +210,7 @@
     start: root.querySelector('[data-k="start"]'),
     end: root.querySelector('[data-k="end"]'),
     len: root.querySelector(".len"),
+    countdown: root.querySelector(".countdown"),
     set: root.querySelector(".set"),
     send: root.querySelector(".send"),
     speed: root.querySelector(".speed"),
@@ -216,6 +226,18 @@
   function setStatus(text, kind = "") {
     el.status.textContent = text || "";
     el.status.className = "status" + (kind ? " " + kind : "");
+  }
+
+  // The countdown row: visible while an in-point is waiting for its out-point,
+  // red and blinking through the model's danger window. The flash phase comes
+  // from the model, not from CSS, so what the tests pin is what blinks.
+  function renderCountdown(st) {
+    const live = Boolean(st && st.running && !st.expired);
+    el.countdown.hidden = !live;
+    if (!live) return;
+    el.countdown.classList.toggle("danger", st.danger);
+    el.countdown.classList.toggle("blink-off", st.danger && !st.flashOn);
+    el.countdown.querySelector("output").textContent = `${st.remaining}s`;
   }
 
   function render() {
@@ -262,6 +284,7 @@
     el.panel.classList.toggle("collapsed", ui.collapsed);
     el.fold.innerHTML = ui.collapsed ? "+" : "&#8211;";
     el.bar.style.cursor = "";
+    renderCountdown(countdown.running() ? countdown.tick(Date.now()) : null);
   }
 
   function showOffline(message) {
@@ -299,6 +322,53 @@
 
   // --- time selection -----------------------------------------------------
 
+  // The count follows the in-point: armed whenever a start is picked (moved
+  // and restarted included), stopped the moment an out-point exists or
+  // everything is cleared.
+  function syncCountdown(action) {
+    if (action === "start" || action === "restart" || action === "start-moved") {
+      countdown.arm(Date.now());
+    } else if (action === "end" || action === "end-too-long" || action === "reset") {
+      countdown.disarm();
+    }
+  }
+
+  function tickCountdown() {
+    if (!alive()) { teardown(); return; }
+    if (!countdown.running()) return;
+    const st = countdown.tick(Date.now());
+    if (st.expired) { autoEnd(); return; }
+    renderCountdown(st);
+  }
+
+  // Zero reached with no out-point clicked: the player's position at the
+  // elapse becomes the out-point, through the same state machine a manual
+  // SET END press goes through, so over-limit and paused-player cases behave
+  // exactly as they do by hand.
+  function autoEnd() {
+    if (pair.state().complete) { countdown.disarm(); render(); return; }
+    const at = position();
+    if (at === null) {
+      countdown.disarm();
+      render();
+      setStatus(`${MAX_LOOP}s elapsed \u2014 no player position, out-point not set`, "err");
+      return;
+    }
+    const result = pair.click(at);
+    syncCountdown(result.action);
+    render();
+    if (result.action === "end") {
+      setStatus(`${MAX_LOOP}s elapsed \u2014 out-point set automatically: ` +
+                `${fmt(result.start)} \u2192 ${fmt(result.end)} (${result.duration}s) \u2014 ready`, "");
+    } else if (result.action === "end-too-long") {
+      setStatus(`${MAX_LOOP}s elapsed \u2014 the auto out-point makes ${result.duration}s, ` +
+                `over the ${MAX_LOOP}s maximum. Click to start a new pair, hold to clear.`, "err");
+    } else if (result.action === "start-moved") {
+      setStatus(`${MAX_LOOP}s elapsed \u2014 the player never moved past the in-point; ` +
+                "counting down again", "");
+    }
+  }
+
   let pressTimer = null;
   let longFired = false;
 
@@ -309,6 +379,7 @@
       return;
     }
     const result = pair.click(at);
+    syncCountdown(result.action);
     render();
 
     if (result.action === "rejected") {
@@ -337,6 +408,7 @@
     pressTimer = setTimeout(() => {
       longFired = true;
       const result = pair.reset();
+      countdown.disarm();
       el.set.classList.remove("holding");
       render();
       setStatus("times cleared — click to set a new in-point", "");
@@ -533,6 +605,7 @@
     clearInterval(rateTimer);
     clearInterval(statusTimer);
     clearInterval(hrefTimer);
+    clearInterval(cdTimer);
     document.removeEventListener("yt-navigate-finish", onNavigate, true);
     document.removeEventListener("yt-page-data-updated", onNavigate, true);
     root.remove();
@@ -541,6 +614,7 @@
   let rateTimer = null;
   let statusTimer = null;
   let hrefTimer = null;
+  let cdTimer = null;
 
   function place(left, top) {
     const width = 268;
@@ -584,6 +658,7 @@
 
   function onNavigate() {
     pair.reset();
+    countdown.disarm();
     render();
     setStatus("");
     refreshStatus();
@@ -657,6 +732,9 @@
   render();
   watchRate();
   rateTimer = setInterval(() => { if (alive()) watchRate(); else teardown(); }, RATE_MS);
+  // The countdown needs a tick finer than its 500 ms flash phase; 200 ms keeps
+  // both the seconds readout and the blink honest without burning the page.
+  cdTimer = setInterval(tickCountdown, COUNTDOWN_MS);
   refreshStatus();
   // The Spotykach drops out of transfer mode on its own, so re-check even when
   // the page does nothing; the dot has to go red on its own too.
