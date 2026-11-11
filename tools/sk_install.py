@@ -11,15 +11,24 @@ Slots are 1-based here, matching what the hardware shows. The USB side maps
 them to the device's 0-based indices and to tape letters via the device's own
 tape table, so nothing is hardcoded to a particular unit.
 
-New samples land in slot 1 of the target tape and push the rest down; whatever
-falls off the end becomes an archive file instead of being deleted:
+Samples are placed on the six-track chain ``B G P R T Y`` in two modes:
 
-    slot 6 -> SK/<tape>_6_<timestamp>.WAV   (on the card)
-               <archive>/<tape>_6_<timestamp>.WAV (over USB)
+* ``bump``   — the new sample takes slot 1 of its tape and every occupied
+  slot behind it moves one place down the chain (tape by tape, in the
+  device's own order). Only a file pushed past the very last slot of the
+  chain (Y/6) falls off, and it is archived instead of deleted.
+* ``append`` — the new sample takes the first empty slot of the chain;
+  nothing moves. A full chain is an error, not an overwrite.
 
-The shift runs high-to-low so a sample is never read after being overwritten,
-and each write is read back and compared before the next one moves. A failure
-half way leaves the tape consistent (a duplicate is possible, silence is not).
+Archive locations:
+
+    card: <card root>/<tape>_<slot>_<timestamp>.WAV
+    usb:  <archive>/<tape>_<slot>_<timestamp>.WAV
+
+Moves run from the end of the chain backwards so a sample is never read
+after being overwritten, and the final write is read back and compared. A
+failure half way leaves the chain consistent (a duplicate is possible,
+silence is not).
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import sk_usb
 
@@ -83,13 +93,16 @@ class CardTransport:
     """Slots are plain files: SK/<tape>/<slot>.WAV."""
 
     name = "card"
+    tape_names = TAPE_ORDER
 
     def __init__(self, root):
         self.root = Path(root)
         self.sk = self.root / "SK"
         if not self.sk.is_dir():
             raise InstallError(f"{self.root} has no SK/ folder — not a Spotykach card")
-        self.archive_dir = self.sk
+        # Overflow lands on the card root, where the user can see it without
+        # digging through SK/.
+        self.archive_dir = self.root
 
     def close(self):
         """Nothing is held open: slots are files."""
@@ -111,6 +124,21 @@ class CardTransport:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_bytes(data)
         os.replace(tmp, path)
+
+    def move(self, tape, slot, to_tape, to_slot):
+        """Rename one slot file onto another; the source disappears."""
+        source = self.slot_path(tape, slot)
+        target = self.slot_path(to_tape, to_slot)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+
+    def occupancy(self):
+        """Which slots hold a file: {tape letter: {1-based slots}}."""
+        return {
+            letter: {slot for slot in range(1, SLOTS_PER_TAPE + 1)
+                     if self.slot_path(letter, slot).is_file()}
+            for letter in self.tape_names
+        }
 
     def clear(self, tape, slot):
         try:
@@ -163,6 +191,23 @@ class UsbTransport:
         self.wrote = True
         self.link.upload(self._tape_index(tape), slot - 1, data)
 
+    def move(self, tape, slot, to_tape, to_slot):
+        """Copy one slot to another and delete the source."""
+        data = self.read(tape, slot)
+        if data is None:
+            raise InstallError(f"cannot move {tape}/{slot} — the slot is empty")
+        self.write(to_tape, to_slot, data)
+        self.clear(tape, slot)
+
+    def occupancy(self):
+        """Which slots the unit reports as filled: {tape letter: {slots}}."""
+        occupied = {letter: set() for letter in self.tape_names}
+        for entry in self.link.list_slots():
+            index = ord(entry.tape)
+            if entry.flags and index < len(self.tape_names):
+                occupied[self.tape_names[index]].add(entry.slot + 1)
+        return occupied
+
     def clear(self, tape, slot):
         self.link.remove(self._tape_index(tape), slot - 1)
 
@@ -212,7 +257,36 @@ def open_transport(preferred="auto", card_root=None, archive_dir=None):
     raise NoTransport(reasons)
 
 
-# --- the bump -------------------------------------------------------------
+# --- placement ------------------------------------------------------------
+
+
+def tape_chain(transport, tape):
+    """The flat slot chain from ``tape`` to the end, in device order.
+
+    ``B G P R T Y`` with six slots each is how the unit itself lays its tapes
+    out; a chain starts at the tape being written and runs to the last slot of
+    the last tape, so bumping can cascade across tapes and appending can find
+    the next free slot wherever it lives.
+    """
+    names = getattr(transport, "tape_names", None) or TAPE_ORDER
+    if tape not in names:
+        raise InstallError(
+            f"tape {tape!r} is not on this unit (it has {' '.join(names)})")
+    start = names.index(tape)
+    return [(letter, slot) for letter in names[start:]
+            for slot in range(1, SLOTS_PER_TAPE + 1)]
+
+
+def _occupancy(transport):
+    """Which slots hold a sample: {tape letter: {1-based slots}}."""
+    probe = getattr(transport, "occupancy", None)
+    if callable(probe):
+        return cast("dict[str, set[int]]", probe())
+    # Transports without a cheap probe (test doubles) get asked slot by slot.
+    names = getattr(transport, "tape_names", None) or TAPE_ORDER
+    return {letter: {slot for slot in range(1, SLOTS_PER_TAPE + 1)
+                     if transport.read(letter, slot)}
+            for letter in names}
 
 
 def _archive_write(directory, tape, slot, data, stamp):
@@ -227,53 +301,89 @@ def _archive_write(directory, tape, slot, data, stamp):
     return path
 
 
-def shift_down(transport, tape, archive_dir=None, slots=SLOTS_PER_TAPE, stamp=None):
-    """Move every sample on the tape down one slot; return the archive path.
+def _bump(transport, chain, archive_dir, stamp=None):
+    """Push every occupied slot on the chain one place down.
 
-    Slot ``slots`` is copied out before anything moves, so the file that falls
-    off the end is never lost. Samples are moved, never merged: an empty slot
-    clears the slot below it rather than leaving a stale duplicate behind.
+    Returns ``(moves, archived_path)``. Only the file sitting on the very
+    last slot of the chain can fall off; it is copied to ``archive_dir``
+    with a timestamp suffix before anything moves. Slots are moved end-first
+    so nothing is ever overwritten before it has been read.
     """
-    stamp = stamp or timestamp()
+    occupied = _occupancy(transport)
+    filled = [i for i, (letter, slot) in enumerate(chain)
+              if slot in occupied.get(letter, ())]
+    if not filled:
+        return 0, None
+    if 0 not in filled:
+        # The slot being written is already free — nothing is displaced, so
+        # nothing moves, wherever else on the chain samples live.
+        return 0, None
+
     archived = None
-
-    overflow = transport.read(tape, slots)
-    if overflow:
-        archived = _archive_write(archive_dir or "/tmp", tape, slots, overflow, stamp)
-
-    for slot in range(slots - 1, 0, -1):
-        data = transport.read(tape, slot)
+    if filled[-1] == len(chain) - 1:            # something falls off the end
+        letter, slot = chain[-1]
+        data = transport.read(letter, slot)
         if data:
-            transport.write(tape, slot + 1, data)
-        else:
-            transport.clear(tape, slot + 1)
+            archived = _archive_write(
+                archive_dir or "/tmp", letter, slot, data, stamp or timestamp())
+        filled.pop()
 
-    transport.clear(tape, 1)
-    return archived
+    moves = 0
+    for i in reversed(filled):
+        from_tape, from_slot = chain[i]
+        to_tape, to_slot = chain[i + 1]
+        transport.move(from_tape, from_slot, to_tape, to_slot)
+        moves += 1
+    return moves, archived
 
 
-def install_sample(transport, tape, data, archive_dir=None, slot=1, shift=True,
+def _next_free(transport, chain):
+    """The first empty slot on the chain, or an error when it is full."""
+    occupied = _occupancy(transport)
+    for letter, slot in chain:
+        if slot not in occupied.get(letter, ()):
+            return letter, slot
+    raise InstallError(
+        f"every slot from {chain[0][0]}/1 to {chain[-1][0]}/{chain[-1][1]} is "
+        "full — free a slot on the unit or use bump mode")
+
+
+def install_sample(transport, tape, data, archive_dir=None, mode="bump",
                    stamp=None):
-    """Put ``data`` in ``slot`` of ``tape``, shifting the rest down first."""
-    if slot < 1 or slot > SLOTS_PER_TAPE:
-        raise ValueError(f"slot {slot} is outside 1..{SLOTS_PER_TAPE}")
+    """Place ``data`` on the chain starting at ``tape``.
 
+    ``mode="bump"``   — slot 1 of the tape; occupied slots cascade down
+                        ``B G P R T Y``; only what falls off the very end is
+                        archived (to ``archive_dir``, defaulting to the
+                        transport's own archive location).
+    ``mode="append"`` — the first empty slot of the chain; nothing moves.
+    """
+    if mode not in ("bump", "append"):
+        raise ValueError(f"unknown placement mode {mode!r} (bump or append)")
+
+    chain = tape_chain(transport, tape)
     archive_dir = archive_dir or getattr(transport, "archive_dir", None)
-    archived = shift_down(transport, tape, archive_dir=archive_dir, stamp=stamp) \
-        if shift else None
-    transport.write(tape, slot, data)
 
-    back = transport.read(tape, slot)
+    if mode == "append":
+        letter, slot = _next_free(transport, chain)
+        moves, archived = 0, None
+    else:
+        moves, archived = _bump(transport, chain, archive_dir, stamp)
+        letter, slot = chain[0]
+
+    transport.write(letter, slot, data)
+
+    back = transport.read(letter, slot)
     if back != data:
         raise InstallError(
-            f"read-back mismatch on {tape}/{slot}: wrote {len(data)} bytes, "
+            f"read-back mismatch on {letter}/{slot}: wrote {len(data)} bytes, "
             f"got {len(back) if back else 0}"
         )
     return Placement(
         transport=transport.name,
-        tape=tape,
+        tape=letter,
         slot=slot,
-        shifted=SLOTS_PER_TAPE if shift else 0,
+        shifted=moves,
         archived=archived,
         detail=f"{len(data):,} bytes verified",
     )

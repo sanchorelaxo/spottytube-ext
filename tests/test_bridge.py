@@ -138,8 +138,10 @@ class TestHealth(ServerCase):
 
 
 class TestSample(ServerCase):
+    # No deck in the payload: the GUI dropped deck selection because every
+    # save lands in the B G P R T Y tape chain, not in a particular deck.
     payload = {"url": "https://www.youtube.com/watch?v=abcdefghijk",
-               "start": "1:00", "end": "1:12", "deck": "a"}
+               "start": "1:00", "end": "1:12"}
 
     def test_job_runs_tool_and_returns_result(self):
         status, body, _ = self.request("/sample", "POST", self.payload)
@@ -150,7 +152,8 @@ class TestSample(ServerCase):
         self.assertEqual(job["status"], "done")
         self.assertEqual(job["result"]["deck"], "A")
         self.assertEqual(job["result"]["tape"], "B")
-        self.assertEqual(job["result"]["track"], 1)
+        self.assertEqual(job["result"]["slot"], 1)
+        self.assertEqual(job["result"]["mode"], "bump")
         self.assertEqual(job["exit_code"], 0)
 
     def test_tool_receives_exact_arguments(self):
@@ -159,14 +162,41 @@ class TestSample(ServerCase):
         self.wait_job(body["job_id"])
         argv = self.args_file.read_text().split("\n")
         self.assertEqual(argv, ["--url", self.payload["url"], "--start", "1:00",
-                                "--end", "1:12", "--deck", "a", "--json"])
+                                "--end", "1:12", "--json"])
 
-    def test_deck_b_maps_to_second_slot(self):
+    def test_optional_deck_still_reaches_the_tool(self):
         payload = dict(self.payload, deck="b")
         status, body, _ = self.request("/sample", "POST", payload)
         self.assertEqual(status, 202)
         job = self.wait_job(body["job_id"])
-        self.assertEqual(job["result"]["track"], 2)
+        self.assertEqual(job["result"]["slot"], 2)
+        argv = self.args_file.read_text().split("\n")
+        self.assertEqual(argv[argv.index("--deck") + 1], "b")
+
+    # -- save mode ----------------------------------------------------------
+
+    def test_default_mode_is_bump_and_passes_no_flag(self):
+        status, body, _ = self.request("/sample", "POST", self.payload)
+        self.assertEqual(status, 202, body)
+        self.wait_job(body["job_id"])
+        self.assertEqual(body["meta"]["mode"], "bump")
+        self.assertNotIn("--mode", self.args_file.read_text().split("\n"))
+
+    def test_append_mode_reaches_the_tool(self):
+        status, body, _ = self.request("/sample", "POST",
+                                       dict(self.payload, mode="append"))
+        self.assertEqual(status, 202, body)
+        job = self.wait_job(body["job_id"])
+        self.assertEqual(job["result"]["mode"], "append")
+        argv = self.args_file.read_text().split("\n")
+        self.assertEqual(argv[argv.index("--mode") + 1], "append")
+        self.assertEqual(body["meta"]["mode"], "append")
+
+    def test_bad_mode_is_rejected(self):
+        status, body, _ = self.request("/sample", "POST",
+                                       dict(self.payload, mode="sideways"))
+        self.assertEqual(status, 400)
+        self.assertIn("mode", body["error"])
 
     def test_too_long_is_rejected_before_any_download(self):
         payload = dict(self.payload, start="0:00", end="1:30")

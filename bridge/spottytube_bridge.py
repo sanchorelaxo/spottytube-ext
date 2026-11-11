@@ -5,7 +5,9 @@ A browser extension cannot start a process. This listens on 127.0.0.1 and turns
 one small JSON request into one ``sample_tool.py`` run, so the widget on a page
 can hand a time range to the Spotykach.
 
-    POST /sample   {"url","start","end","deck"}  -> 202 {"job_id"}
+    POST /sample   {"url","start","end"}  -> 202 {"job_id"}
+                   optional "mode" ("bump"|"append"), "speed", "source",
+                   "transport", "tape", "deck" (legacy label)
     GET  /jobs/<id>                              -> job state, result, output
     GET  /status                                 -> which transports work now
     GET  /card                                   -> `sample_tool.py --check-card`
@@ -233,7 +235,13 @@ def _validate(body):
     url = str(body.get("url", "")).strip()
     start = str(body.get("start", "")).strip()
     end = str(body.get("end", "")).strip()
-    deck = str(body.get("deck", "")).strip().lower()
+    # Deck is optional now: every save lands on the B G P R T Y tape chain, so
+    # the GUI no longer picks a deck. An explicit a/b still passes through for
+    # old CLI callers; anything else is refused.
+    deck = str(body.get("deck", "") or "").strip().lower() or None
+    # Placement on the chain: bump (slot 1, everything shifts down) is the
+    # default; append takes the first free slot and moves nothing.
+    mode = str(body.get("mode", "") or "").strip().lower() or "bump"
     # Optional pass-throughs. `source` stays a plain string so the bridge never
     # hardcodes a provider; the tool decides what it means and rejects unknowns.
     source = str(body.get("source", "") or "").strip().lower() or None
@@ -243,8 +251,10 @@ def _validate(body):
 
     if not url.startswith(("http://", "https://")):
         return None, "url must be an http(s) URL"
-    if deck not in ("a", "b"):
+    if deck is not None and deck not in ("a", "b"):
         return None, "deck must be 'a' or 'b'"
+    if mode not in ("bump", "append"):
+        return None, "mode must be 'bump' or 'append'"
     if transport is not None and transport not in ("auto", "usb", "card"):
         return None, "transport must be 'auto', 'usb' or 'card'"
 
@@ -279,7 +289,7 @@ def _validate(body):
                       f"{plays:.2f}s; a deck holds {MAX_LOOP_SECONDS:g}s max")
 
     return {
-        "url": url, "start": start, "end": end, "deck": deck,
+        "url": url, "start": start, "end": end, "deck": deck, "mode": mode,
         "source": source, "transport": transport, "tape": tape, "speed": speed,
     }, None
 
@@ -439,8 +449,12 @@ class Handler(BaseHTTPRequestHandler):
                 "--url", payload["url"],
                 "--start", payload["start"],
                 "--end", payload["end"],
-                "--deck", payload["deck"],
                 "--json"]
+        # Bump is the tool's default, so the flag only appears for append.
+        if payload["mode"] != "bump":
+            argv += ["--mode", payload["mode"]]
+        if payload.get("deck"):
+            argv += ["--deck", payload["deck"]]
         for flag, key in (("--source", "source"),
                           ("--transport", "transport"),
                           ("--tape", "tape")):

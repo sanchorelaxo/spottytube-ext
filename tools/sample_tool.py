@@ -17,13 +17,17 @@ Pipeline:
     2. resolve the newest usable downloader, fetch the audio once, cached
     3. cut [start, end) with ffmpeg
     4. rewrite the header as plain IEEE float via wav_builder
-    5. shift the tape down one slot and put the new sample in slot 1
+    5. place the sample on the tape chain (bump into slot 1, or append)
 
 Ordering:
-    A new sample always lands in slot 1 of its tape and pushes the rest down
-    1 -> 2 -> 3 ... -> 6. Nothing is overwritten: the sample that falls off the
-    end is renamed with a timestamp and kept (SK/ on the card, the local archive
-    directory over USB).
+    Tapes play in device order B G P R T Y, six slots each, files always named
+    1.WAV .. 6.WAV. In bump mode a new sample takes slot 1 and every occupied
+    slot behind it moves one place down the chain — 1.WAV bumps into 2.WAV,
+    B/6.WAV bumps into G/1.WAV, and so on, each move renaming the file to its
+    new slot. A file can only fall off (and get saved to the card ROOT with a
+    timestamp suffix) when the last slot of the chain, Y/6, is full; otherwise
+    it always lands in the next directory in order. Nothing is ever deleted.
+    Append mode takes the first free slot instead and never moves anything.
 
 Deck maximum loop is 42 s, so longer segments are refused rather than silently
 truncated.
@@ -35,10 +39,11 @@ Sources:
 
 Usage:
     python sample_tool.py --url 'https://example.org/watch/abc' \\
-        --start 6:40 --end 7:10 --deck a
+        --start 6:40 --end 7:10
 
     # a local file works too — same pipeline, no download
-    python sample_tool.py --url /path/track.wav --start 12:45 --end 13:15 --deck b
+    python sample_tool.py --url /path/track.wav --start 12:45 --end 13:15 \\
+        --mode append
 
     # what can take a sample right now (used by the GUI)
     python sample_tool.py --status --json
@@ -72,10 +77,6 @@ MAX_SPEED = 2.0
 
 # wav_builder writes a bare 44-byte canonical WAV header, no fact/ext chunks.
 PLAIN_WAV_HEADER = 44
-
-# (tape, track) each deck loads from. Both decks share tape B, so the newest
-# sample sits in slot 1 for deck A and the previous one in slot 2 for deck B.
-DECK_SLOTS = {True: ("B", 1), False: ("B", 2)}
 
 #: Tape a new sample is written to unless another is named.
 DEFAULT_TAPE = "B"
@@ -161,6 +162,7 @@ class SampleResult:
     archived: Path | None = None
     card_path: Path | None = None
     speed: float = 1.0
+    mode: str = "bump"
 
     def as_dict(self):
         return {
@@ -178,6 +180,7 @@ class SampleResult:
             "archived": str(self.archived) if self.archived else None,
             "card_path": str(self.card_path) if self.card_path else None,
             "speed": self.speed,
+            "mode": self.mode,
         }
 
 
@@ -263,11 +266,6 @@ def atempo_chain(speed):
     return [f"atempo={stage:.6g}" for stage in stages]
 
 
-def deck_slot(is_deck_a):
-    """Map deck identity to the (tape, track) slot that deck loads."""
-    return DECK_SLOTS[bool(is_deck_a)]
-
-
 # --- small helpers -------------------------------------------------------
 
 
@@ -280,17 +278,18 @@ def sha256(path):
 
 
 def archive_target(card, cache):
-    """Where a sample that falls off a tape is kept.
+    """Where a sample that falls off the end of the chain is kept.
 
-    Slot 6 is not deleted: it is renamed with a timestamp and saved to SK/ on
-    the card, which is where the instrument's own hierarchy lives. Over USB
+    Nothing is ever deleted: the file pushed off the last slot is renamed
+    with a timestamp suffix and saved to the card ROOT, where it is visible
+    the moment the card is mounted, without digging through SK/. Over USB
     there is no filesystem to write to, so a mounted card still wins; with no
     card at all the archive falls back to the local cache directory.
     """
     if card is not None and (Path(card) / "SK").is_dir():
         try:
-            if os.access(Path(card) / "SK", os.W_OK):
-                return Path(card) / "SK"
+            if os.access(Path(card), os.W_OK):
+                return Path(card)
         except OSError:
             pass
     return Path(cache) / "archive"
@@ -460,9 +459,10 @@ def card_status(root):
         (tapes_present if (sk / letter).is_dir() else tapes_missing).append(letter)
 
     slots = {}
-    for tape, track in DECK_SLOTS.values():
-        path = sk / tape / f"{track}.WAV"
-        slots[f"{tape}/{track}.WAV"] = path.stat().st_size if path.is_file() else None
+    for tape in sk_install.TAPE_ORDER:
+        for track in range(1, sk_install.SLOTS_PER_TAPE + 1):
+            path = sk / tape / f"{track}.WAV"
+            slots[f"{tape}/{track}.WAV"] = path.stat().st_size if path.is_file() else None
     return CardStatus(root=root, sk=sk, writable=writable, free_bytes=free,
                       slots=slots, tapes_present=tapes_present,
                       tapes_missing=tapes_missing)
@@ -761,14 +761,14 @@ def _plausible(transport, card_root):
     return False
 
 
-def deliver(transport, card_root, tape, data, archive_dir, split=True, attempts=2):
+def deliver(transport, card_root, tape, data, archive_dir, mode="bump", attempts=2):
     """Open a transport and put ``data`` on ``tape``, opening it late.
 
     The unit leaves transfer mode on its own after a few seconds of silence, so
     the transport is opened here, immediately before the write, and never held
     across a download and an ffmpeg pass. A drop before anything reached the
     tape is retried once: the tape is still untouched, so starting over is
-    safe. A drop after a write is not retried — the shift is not idempotent.
+    safe. A drop after a write is not retried — the bump is not idempotent.
     """
     last = None
     for attempt in range(attempts):
@@ -780,7 +780,7 @@ def deliver(transport, card_root, tape, data, archive_dir, split=True, attempts=
                 "cannot deliver the sample — " + "; ".join(error.reasons)) from None
         try:
             return sk_install.install_sample(
-                chosen, tape, data, archive_dir=archive_dir, shift=split)
+                chosen, tape, data, archive_dir=archive_dir, mode=mode)
         except sk_install.sk_usb.TransferDropped as error:
             last = error
             if getattr(chosen, "wrote", False) or attempt + 1 >= attempts:
@@ -793,7 +793,7 @@ def deliver(transport, card_root, tape, data, archive_dir, split=True, attempts=
 
 def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
                  search_roots=None, install=True, source=None, transport=None,
-                 tape=None, archive_dir=None, speed=1.0):
+                 tape=None, archive_dir=None, speed=1.0, mode="bump"):
     """Build a segment and (by default) install it on the instrument.
 
     ``start``/``end`` accept ``SS``/``MM:SS``/``HH:MM:SS``. When ``url`` is an
@@ -831,6 +831,8 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
         raise ValueError(
             f"tape {target_tape!r} is not one of {' '.join(sorted(wb.TAPES))}"
         )
+    if mode not in ("bump", "append"):
+        raise ValueError(f"unknown placement mode {mode!r} (bump or append)")
     cache = Path(cache_dir) if cache_dir else DEFAULT_CACHE
     archive = archive_dir or archive_target(card, cache)
 
@@ -872,21 +874,27 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
     result = SampleResult(
         source=str(url), source_id=sid, start=start_s, end=end_s,
         deck="A" if is_deck_a else "B", tape=target_tape, slot=1,
-        segment_path=segment, installed=False, speed=speed,
+        segment_path=segment, installed=False, speed=speed, mode=mode,
     )
     if not install:
         return result
 
     placement = deliver(
         transport, card_root, target_tape, segment.read_bytes(), archive,
+        mode=mode,
     )
     result.installed = True
     result.transport = placement.transport
     result.shifted = placement.shifted
     result.archived = placement.archived
+    # The chain decides where the sample really landed: bump always takes
+    # slot 1 of the target tape, append takes the first free slot, which may
+    # be on a later tape entirely.
+    result.tape = placement.tape
+    result.slot = placement.slot
     if placement.transport == "card":
         result.card_path = sk_install.CardTransport(card_root).slot_path(
-            target_tape, placement.slot)
+            placement.tape, placement.slot)
     return result
 
 
@@ -958,7 +966,14 @@ def main(argv=None):
     parser.add_argument("--start", help="SS, MM:SS or HH:MM:SS")
     parser.add_argument("--end", help="SS, MM:SS or HH:MM:SS")
     parser.add_argument("--deck", choices=["a", "b"],
-                        help="which deck loads it (isDeckA true/false)")
+                        help="optional deck label kept for old CLI wrappers; "
+                             "the GUI no longer picks a deck — every save "
+                             "lands on the B G P R T Y chain")
+    parser.add_argument("--mode", choices=["bump", "append"], default="bump",
+                        help="bump: slot 1, everything behind it moves one "
+                             "slot down B G P R T Y, and only what falls off "
+                             "Y/6 is archived to the card root; append: first "
+                             "free slot, nothing moves (default bump)")
     parser.add_argument("--tape", default=DEFAULT_TAPE,
                         help=f"tape to write ({' '.join(sorted(wb.TAPES))}; "
                              f"default {DEFAULT_TAPE})")
@@ -990,17 +1005,17 @@ def main(argv=None):
             return 1
 
     missing = [flag for flag, value in (("--url", args.url), ("--start", args.start),
-                                        ("--end", args.end), ("--deck", args.deck))
+                                        ("--end", args.end))
                if value is None]
     if missing:
         parser.error("the following arguments are required: " + ", ".join(missing))
 
     try:
         result = build_sample(
-            args.url, args.start, args.end, args.deck == "a",
+            args.url, args.start, args.end, (args.deck or "a") == "a",
             card=args.card, cache_dir=args.cache_dir, source=args.source,
             transport=args.transport, tape=args.tape, archive_dir=args.archive_dir,
-            speed=args.speed,
+            speed=args.speed, mode=args.mode,
         )
     except (ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
@@ -1009,16 +1024,20 @@ def main(argv=None):
     if args.json:
         print(json.dumps(result.as_dict(), indent=2))
     else:
-        print(f"deck {result.deck} | tape {result.tape} slot {result.slot}"
+        # Lead with where the sample now lives ON THE UNIT — that is the path
+        # the player shows; the generated segment file is only the source.
+        print(f"{result.mode}: tape {result.tape} slot {result.slot}"
               f" via {result.transport}")
+        if result.card_path:
+            print(f"on card: {result.card_path}")
         print(f"segment: {result.segment_path} ({result.end - result.start:g}s"
               f"{'' if abs(result.speed - 1) < 1e-9 else f' at {result.speed:g}x'})")
         print(f"installed: yes, verified"
-              f"{' (shifted ' + str(result.shifted) + ' slots)' if result.shifted else ''}")
+              f"{' (bumped ' + str(result.shifted) + ' slots)' if result.shifted else ''}")
         if result.archived:
-            print(f"fell off the tape, archived: {result.archived}")
+            print(f"fell off the end of the chain, archived to: {result.archived}")
         if result.transport == "card":
-            print("Power-cycle with the card in, then load the slot on that deck "
+            print("Power-cycle with the card in, then load the slot on the deck "
                   "once — that is what registers its pre-load.")
     return 0
 

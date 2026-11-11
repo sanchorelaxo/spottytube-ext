@@ -158,7 +158,12 @@ class TestCardTransport(CardFixture):
             sk_install.CardTransport(self.root / "elsewhere")
 
 
-class TestShift(CardFixture):
+class TestBump(CardFixture):
+    """Bump mode: the new sample takes slot 1, everything behind it moves one
+    slot down the global B G P R T Y order — six slots per tape, tapes in the
+    device's own order — and only a file pushed past the very last slot of the
+    chain falls off, into the card root with a timestamp suffix."""
+
     def test_new_sample_lands_in_slot_one(self):
         originals = self.seed()
         transport = sk_install.CardTransport(self.root)
@@ -172,20 +177,46 @@ class TestShift(CardFixture):
         self.assertEqual(transport.read("B", 2), originals[0])
         self.assertEqual(transport.read("B", 3), originals[1])
 
-    def test_nothing_is_lost_and_the_overflow_is_archived(self):
-        originals = self.seed()
+    def test_overflow_runs_into_the_next_tape_instead_of_archiving(self):
+        originals = self.seed()                     # B/1..B/6, nothing else
         transport = sk_install.CardTransport(self.root)
+
+        placement = sk_install.install_sample(transport, "B", wav(99))
+
+        everything = [transport.read("B", s) for s in range(1, 7)]
+        self.assertEqual(everything[1:], originals[:5])   # shifted by one
+        self.assertEqual(transport.read("G", 1), originals[5])  # B/6 -> G/1
+        self.assertIsNone(placement.archived)             # room on the chain
+        self.assertEqual(placement.shifted, 6)
+
+    def test_bump_cascades_across_tapes_in_order(self):
+        transport = sk_install.CardTransport(self.root)
+        self.seed()                                 # B full
+        self.seed("G", 2)                           # G/1, G/2
+
+        placement = sk_install.install_sample(transport, "B", wav(99))
+
+        self.assertEqual(transport.read("G", 3), wav(2))   # old G/2
+        self.assertEqual(transport.read("G", 2), wav(1))   # old G/1
+        self.assertEqual(transport.read("G", 1), wav(6))   # old B/6
+        self.assertEqual(transport.read("B", 6), wav(5))   # old B/5
+        self.assertEqual(placement.shifted, 8)
+        self.assertIsNone(placement.archived)
+
+    def test_nothing_is_lost_and_the_overflow_is_archived_to_root(self):
+        transport = sk_install.CardTransport(self.root)
+        for letter in "BGPRTY":                     # fill the whole chain
+            self.seed(letter)
+        last = transport.read("Y", 6)
 
         placement = sk_install.install_sample(
             transport, "B", wav(99), stamp="20260101-120000")
 
-        everything = [transport.read("B", s) for s in range(1, 7)]
-        self.assertEqual(everything[1:], originals[:5])          # shifted by one
-        self.assertNotIn(originals[5], everything)               # fell off
+        self.assertEqual(transport.read("Y", 6), wav(5))   # shifted down
         self.assertIsNotNone(placement.archived)
-        self.assertTrue(placement.archived.name.startswith("B_6_20260101-120000"))
-        self.assertEqual(placement.archived.parent, self.sk)     # saved to SK/
-        self.assertEqual(placement.archived.read_bytes(), originals[5])
+        self.assertTrue(placement.archived.name.startswith("Y_6_20260101-120000"))
+        self.assertEqual(placement.archived.parent, self.root)   # card ROOT
+        self.assertEqual(placement.archived.read_bytes(), last)
 
     def test_partial_tape_keeps_gaps_clean(self):
         transport = sk_install.CardTransport(self.root)
@@ -196,6 +227,7 @@ class TestShift(CardFixture):
 
         self.assertEqual(transport.read("G", 1), wav(99))
         self.assertEqual(transport.read("G", 2), wav(1))
+        self.assertIsNone(transport.read("G", 3))
         self.assertEqual(transport.read("G", 4), wav(3))
         self.assertIsNone(transport.read("G", 5))
         self.assertIsNone(transport.read("G", 6))
@@ -206,14 +238,15 @@ class TestShift(CardFixture):
         self.assertIsNone(placement.archived)
         self.assertEqual(transport.read("R", 1), wav(7))
 
-    def test_other_tapes_are_untouched(self):
+    def test_a_free_first_slot_moves_nothing(self):
         self.seed("G", 2)
         transport = sk_install.CardTransport(self.root)
         before = [transport.read("G", s) for s in range(1, 7)]
 
-        sk_install.install_sample(transport, "B", wav(99))
+        placement = sk_install.install_sample(transport, "B", wav(99))
 
         self.assertEqual([transport.read("G", s) for s in range(1, 7)], before)
+        self.assertEqual(placement.shifted, 0)
 
     def test_read_back_mismatch_is_reported(self):
         transport = sk_install.CardTransport(self.root)
@@ -222,6 +255,90 @@ class TestShift(CardFixture):
         with self.assertRaises(sk_install.InstallError) as caught:
             sk_install.install_sample(transport, "B", wav(1))
         self.assertIn("read-back mismatch", str(caught.exception))
+
+
+class TestAppend(CardFixture):
+    """Append mode: the new sample takes the first empty slot of the chain
+    starting at its tape; nothing moves and nothing is archived."""
+
+    def test_append_on_an_empty_card_takes_b1(self):
+        transport = sk_install.CardTransport(self.root)
+        placement = sk_install.install_sample(transport, "B", wav(9),
+                                              mode="append")
+        self.assertEqual((placement.tape, placement.slot), ("B", 1))
+        self.assertEqual(transport.read("B", 1), wav(9))
+        self.assertEqual(placement.shifted, 0)
+        self.assertIsNone(placement.archived)
+
+    def test_append_takes_the_next_free_slot_across_tapes(self):
+        transport = sk_install.CardTransport(self.root)
+        self.seed()                                 # B full
+        self.seed("G", 2)                           # G/1, G/2 taken
+
+        placement = sk_install.install_sample(transport, "B", wav(9),
+                                              mode="append")
+
+        self.assertEqual((placement.tape, placement.slot), ("G", 3))
+        self.assertEqual(transport.read("G", 3), wav(9))
+        self.assertEqual(transport.read("B", 1), wav(1))   # nothing moved
+        self.assertEqual(transport.read("G", 1), wav(1))
+
+    def test_append_respects_the_start_tape(self):
+        transport = sk_install.CardTransport(self.root)
+        self.seed("R", 3)
+
+        placement = sk_install.install_sample(transport, "R", wav(9),
+                                              mode="append")
+
+        self.assertEqual((placement.tape, placement.slot), ("R", 4))
+
+    def test_append_refuses_when_the_chain_is_full(self):
+        transport = sk_install.CardTransport(self.root)
+        for letter in "BGPRTY":
+            self.seed(letter)
+
+        with self.assertRaises(sk_install.InstallError) as caught:
+            sk_install.install_sample(transport, "B", wav(9), mode="append")
+        self.assertIn("full", str(caught.exception))
+
+    def test_unknown_mode_is_rejected(self):
+        transport = sk_install.CardTransport(self.root)
+        with self.assertRaises(ValueError):
+            sk_install.install_sample(transport, "B", wav(9), mode="sideways")
+
+
+class TestTransportPrimitives(CardFixture):
+    def test_card_occupancy_lists_filled_slots(self):
+        transport = sk_install.CardTransport(self.root)
+        transport.write("B", 2, wav(1))
+        transport.write("G", 6, wav(2))
+
+        occupied = transport.occupancy()
+
+        self.assertEqual(occupied["B"], {2})
+        self.assertEqual(occupied["G"], {6})
+        self.assertEqual(occupied["P"], set())
+
+    def test_move_renames_within_and_across_tapes(self):
+        transport = sk_install.CardTransport(self.root)
+        transport.write("B", 6, wav(1))
+
+        transport.move("B", 6, "G", 1)
+
+        self.assertIsNone(transport.read("B", 6))
+        self.assertEqual(transport.read("G", 1), wav(1))
+        self.assertTrue((self.sk / "G" / "1.WAV").is_file())
+
+    def test_tape_chain_follows_the_device_order(self):
+        transport = sk_install.CardTransport(self.root)
+        chain = sk_install.tape_chain(transport, "T")
+        self.assertEqual(chain[0], ("T", 1))
+        self.assertEqual(chain[6], ("Y", 1))
+        self.assertEqual(chain[-1], ("Y", 6))
+        self.assertEqual(len(chain), 12)
+        with self.assertRaises(sk_install.InstallError):
+            sk_install.tape_chain(transport, "X")
+
 
 
 class TestTransportChoice(unittest.TestCase):
@@ -556,7 +673,7 @@ class TestTransferDrop(CardFixture):
         data = wav(9)
         with mock.patch.object(install, "open_transport", opener):
             placement = sample_tool.deliver(
-                "usb", self.root, "B", data, self.root / "archive", split=True)
+                "usb", self.root, "B", data, self.root / "archive")
 
         self.assertEqual(len(seen), 2)
         self.assertEqual(placement.slot, 1)
@@ -587,7 +704,7 @@ class TestTransferDrop(CardFixture):
         with mock.patch.object(self.install, "open_transport", opener):
             with self.assertRaises(usb.TransferDropped):
                 sample_tool.deliver(
-                    "usb", self.root, "B", wav(9), self.root / "archive", split=True)
+                    "usb", self.root, "B", wav(9), self.root / "archive")
 
         self.assertEqual(len(seen), 1)
 

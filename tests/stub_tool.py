@@ -43,6 +43,7 @@ def main():
         return args[args.index(flag) + 1] if flag in args else default
 
     deck = (value("--deck") or "a").upper()
+    mode = value("--mode") or "bump"
     print("card: /tmp/fake-card  (ready)")
     print(json.dumps({
         "source": value("--url"),
@@ -50,8 +51,9 @@ def main():
         "start": 60.0,
         "end": 72.0,
         "deck": deck,
+        "mode": mode,
         "tape": "B",
-        "track": 1 if deck == "A" else 2,
+        "slot": 1 if deck == "A" else 2,
         "segment": "/tmp/fake-card/segments/clip.WAV",
         "card_path": "/tmp/fake-card/SK/B/1.WAV" if deck == "A" else "/tmp/fake-card/SK/B/2.WAV",
         "installed": True,
