@@ -74,3 +74,23 @@ test("speed and snap survive a reload", () => {
   assert.match(content, /speed: sp\.speed, snap: sp\.snap/);
   assert.match(content, /rate\.restore\(s\)/);
 });
+
+test("the widget offers a save mode, not a deck choice", () => {
+  assert.doesNotMatch(content, /data-deck=/);
+  assert.match(content, /data-mode="bump"/);
+  assert.match(content, /data-mode="append"/);
+  const payload = content.slice(content.indexOf("type: \"sample\""));
+  assert.match(payload, /mode:\s*ui\.mode/);
+  assert.doesNotMatch(payload.slice(0, payload.indexOf("});")), /deck:/);
+});
+
+test("a done job reports the on-unit tape path, not a generated wav path", () => {
+  assert.match(content, /\$\{r\.tape\}\/\$\{r\.slot\}\.WAV/);
+  assert.doesNotMatch(content, /r\.card_path/);
+  assert.doesNotMatch(content, /r\.track/);
+});
+
+test("the save mode survives a reload", () => {
+  assert.match(content, /mode: ui\.mode, collapsed/);
+  assert.match(content, /s\.mode === "append"/);
+});

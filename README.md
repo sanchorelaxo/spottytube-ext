@@ -89,8 +89,9 @@ pipeline needs no change).
 - **Hold the same button** (~0.5 s) to reset both indexes.
 - If you click behind the in-point, the in-point moves rather than producing an
   impossible range.
-- **Deck A / Deck B** picks which slot on tape B that deck loads: slot 1 for
-  deck A, slot 2 for deck B. `--tape` sends to another tape.
+- **Bump / Append** picks where on the tape chain the sample lands (see Slot
+  order below). The deck choice is gone: files live in the `B G P R T Y`
+  directories, not on a deck. `--tape` picks the tape the chain starts at.
 - **Playback speed** slider (0.25x-2x, in 0.05 steps) says how fast the range
   was heard. The slice is cut normally and then re-recorded in a second ffmpeg
   pass, so the deck still gets an ordinary normal-speed WAV — just a longer or
@@ -100,13 +101,14 @@ pipeline needs no change).
   is actually running at (`playbackRate`, read every 0.5 s, no site API). Turn
   it off and the slider stays where the player left it. The button is
   `aria-pressed`; the readout shows the current rate.
-- **Send to deck** posts the range; the status line reports the transport and
-  then the finished slot.
+- **Send to deck** posts the range; the status line reports where the sample
+  landed on the unit — its tape directory and slot, like `G/2.WAV` — not the
+  generated segment file on this machine.
 - Green dot: the bridge is up and something can take a sample. Red dot: the
   bridge is down, or neither USB nor a card is available (the Send button is
   disabled). It re-checks every 20 s.
-- Drag the title bar to move it; position, deck, collapsed state, speed and
-  snap persist.
+- Drag the title bar to move it; position, save mode, collapsed state, speed
+  and snap persist.
 
 Times are whole seconds; `sample_tool` parses `SS`, `MM:SS` or `HH:MM:SS`.
 The 42 s ceiling is fixed: it caps the range you pick, and it caps what the
@@ -117,27 +119,38 @@ whose stored length is over 42 s.
 
 ## Slot order
 
-A new sample always lands in slot 1 of its tape. Everything already there
-moves down one slot (1->2, 2->3, ...), so deck A's slot is the newest sample
-and deck B's is the one before it.
+Tapes play in device order B G P R T Y, six slots each, files always named
+`1.WAV` .. `6.WAV` — the whole device is one chain of 36 slots.
 
-Nothing is deleted. The sample that falls off slot 6 is renamed with a
-timestamp and saved to `SK/<tape>_6_<YYYYmmdd-HHMMSS>.WAV` on the card; over
-USB, where there is no filesystem to write to, a mounted card is still used for
-the archive, and with no card at all it goes to
+**Bump** (the default): the new sample takes slot 1 of the target tape and
+every occupied slot behind it moves one place down the chain — `1.WAV` bumps
+into `2.WAV`, `B/6.WAV` bumps into `G/1.WAV`, and so on, each file renamed to
+its new slot. A file can only fall off the chain when the very last slot,
+`Y/6`, is full; otherwise it always lands in the next directory in order.
+
+**Append**: the new sample takes the first free slot on the chain and nothing
+moves. A completely full chain is reported as an error instead of bumping.
+
+Nothing is deleted. The file pushed off `Y/6` is renamed with a timestamp and
+saved to the card ROOT as `<tape>_6_<YYYYmmdd-HHMMSS>.WAV`; over USB, where
+there is no filesystem to write to, a mounted card is still used for the
+archive, and with no card at all it goes to
 `~/.hermes/cache/spotykach/archive/`.
 
-The shift runs high to low and each write is read back and compared before the
-next move, so an interruption leaves a duplicate rather than silence.
+Moves run from the far end backwards and each write is read back and compared
+before the next move, so an interruption leaves a duplicate rather than
+silence.
 
 ## Bridge API
 
     GET  /health        {"ok":true,"tool_present":true,"card":"/media/...","pending_jobs":0}
     GET  /status        {"ok":true,"ready":true,"transport":"usb","usb":{...},"card":{...}}
     GET  /card          runs `sample_tool.py --check-card`
-    POST /sample        {"url","start","end","deck"} -> 202 {"job_id"}
-                        optional: "source" ("generic"|"youtube"), "transport"
-                        ("auto"|"usb"|"card"), "tape" ("B".."Y")
+    POST /sample        {"url","start","end"} -> 202 {"job_id"}
+                        optional: "mode" ("bump"|"append"), "speed",
+                        "source" ("generic"|"youtube"), "transport"
+                        ("auto"|"usb"|"card"), "tape" ("B".."Y"),
+                        "deck" ("a"|"b", legacy pass-through)
     GET  /jobs/<id>     {"status":"queued|running|done|error","result":{...},"stderr":"..."}
 
 Jobs run one at a time on purpose: two downloads would fight over the same
@@ -148,8 +161,8 @@ Spotykach in transfer mode falls back to its MIDI-only USB identity after a few
 seconds of silence, and the tty node leaves with it, so holding it open across a
 download plus an ffmpeg pass ends in `Input/output error` on the next write. If
 the unit drops anyway, the job is retried once as long as nothing has reached
-the tape yet; a drop after a write is reported instead, because the shift down
-a slot is not idempotent.
+the tape yet; a drop after a write is reported instead, because the bump down
+the chain is not idempotent.
 
 Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 `chrome-extension://` origins; JSON POSTs only. Set `SPOTTYTUBE_TOKEN` (with
@@ -157,17 +170,18 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -v            # 116 python tests
+    python3 -m unittest discover -s tests -v            # 129 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 40 widget tests
+                tests/test_widget_wiring.mjs            # 43 widget tests
 
-- `tests/test_bridge.py` — 29 tests, real HTTP against `tests/stub_tool.py`, so
+- `tests/test_bridge.py` — 32 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
-- `tests/test_sample_tool.py` — 55 tests: time parsing, generic source ids,
-  transport choice, the slot shift against a real directory tree (shift,
-  archive, read-back check, partial tapes, untouched neighbours), and the
-  speed cut, measured by decoding the WAVs ffmpeg actually produced.
+- `tests/test_sample_tool.py` — 65 tests: time parsing, generic source ids,
+  transport choice, and placement on the tape chain against a real directory
+  tree (bump cascades across tapes, append finds the first free slot, only a
+  full Y/6 archives to the card root, read-back check, partial tapes), plus
+  the speed cut, measured by decoding the WAVs ffmpeg actually produced.
 - `tests/test_install_browsers.py` — 20 tests: browser detection and filtering
   run under a throwaway PATH of stub executables, so no browser on the machine
   leaks into a result and no root is needed. Covers native, snap and Flatpak
@@ -220,7 +234,7 @@ skipped instead of aborting the card scan.
     INSTALL                        step by step guide for a first install
     tools/sample_tool.py           URL + range -> a slot on the instrument
     tools/sk_usb.py                USB transport (raw termios + amidi, stdlib)
-    tools/sk_install.py            transport contract + slot shift + archive
+    tools/sk_install.py            transport contract + tape-chain placement
     tools/fetch_wav_builder.py     fetches the upstream wav_builder dependency
     tools/wav_builder.py           fetched, gitignored, not vendored
     extension/manifest.json        MV3 content script

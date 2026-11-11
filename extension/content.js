@@ -17,7 +17,7 @@
   const POLL_LIMIT_MS = 16 * 60 * 1000;
   const RATE_MS = 500;
 
-  const ui = { deck: "a", collapsed: false, left: null, top: null,
+  const ui = { mode: "bump", collapsed: false, left: null, top: null,
              busy: false, timer: null, online: null, ready: false, transport: null };
 
   // --- page facts ---------------------------------------------------------
@@ -104,12 +104,12 @@
       .set.armed { background: #3ecf8e; }
       .set.holding { background: #e5484d; color: #fff; }
       .hint { font-size: 10.5px; color: #7d8494; text-align: center; margin-top: -3px; }
-      .deckrow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-      .deck {
+      .moderow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+      .mode {
         all: unset; text-align: center; cursor: pointer; padding: 6px 0; border-radius: 7px;
         background: #0f1115; border: 1px solid #262a33; color: #98a0b0; font-size: 12px;
       }
-      .deck.on { background: #24303f; border-color: #3c5070; color: #dfe8f5; font-weight: 600; }
+      .mode.on { background: #24303f; border-color: #3c5070; color: #dfe8f5; font-weight: 600; }
       .speedrow {
         display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
       }
@@ -171,9 +171,11 @@
         </div>
         <button class="set">SET START</button>
         <div class="hint">click: start, then end &middot; hold: reset</div>
-        <div class="deckrow">
-          <button class="deck on" data-deck="a">Deck A</button>
-          <button class="deck" data-deck="b">Deck B</button>
+        <div class="moderow">
+          <button class="mode on" data-mode="bump"
+                  title="New sample takes slot 1. Everything behind it bumps one slot down B G P R T Y, each file renamed to its new slot. Only when Y/6 is full does the last file fall off &#8212; saved to the card root with a timestamp.">Bump &#183; slot 1</button>
+          <button class="mode" data-mode="append"
+                  title="New sample takes the first free slot on the chain, in B G P R T Y order. Nothing moves.">Append &#183; next free</button>
         </div>
         <div class="speedrow">
           <input class="speed" type="range" min="0.25" max="2" step="0.05" value="1"
@@ -206,7 +208,7 @@
     snap: root.querySelector(".snap"),
     snaptext: root.querySelector(".snaptext"),
     status: root.querySelector(".status"),
-    decks: Array.from(root.querySelectorAll(".deck"))
+    modes: Array.from(root.querySelectorAll(".mode"))
   };
 
   // --- rendering ----------------------------------------------------------
@@ -255,7 +257,7 @@
     el.send.disabled = !s.complete || overDeck || ui.busy || !ui.ready;
     el.send.textContent = ui.busy ? "Working\u2026" : "Send to deck";
 
-    el.decks.forEach((b) => b.classList.toggle("on", b.dataset.deck === ui.deck));
+    el.modes.forEach((b) => b.classList.toggle("on", b.dataset.mode === ui.mode));
     el.vid.textContent = videoId() || "no video";
     el.panel.classList.toggle("collapsed", ui.collapsed);
     el.fold.innerHTML = ui.collapsed ? "+" : "&#8211;";
@@ -363,12 +365,12 @@
     host.addEventListener(name, (event) => event.stopPropagation());
   });
 
-  // --- deck choice --------------------------------------------------------
+  // --- save-mode choice -----------------------------------------------------
 
-  el.decks.forEach((button) => {
+  el.modes.forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      ui.deck = button.dataset.deck;
+      ui.mode = button.dataset.mode;
       render();
       persist();
     });
@@ -450,8 +452,12 @@
       if (job.status === "done" && job.result) {
         const r = job.result;
         const at = r.speed && r.speed !== 1 ? ` @ ${Number(r.speed).toFixed(2)}x` : "";
-        setStatus(`deck ${r.deck} \u2190 ${r.tape}/${r.track}.WAV \u00b7 ` +
-                  `${Math.round(r.end - r.start)}s${at}\n${r.card_path || r.segment}`, "ok");
+        // Show where the sample lives ON THE UNIT — its tape directory and
+        // slot — not the generated segment file on this machine.
+        setStatus(`saved \u2192 ${r.tape}/${r.slot}.WAV \u00b7 ` +
+                  `${Math.round(r.end - r.start)}s${at}\n` +
+                  `${r.mode === "append" ? "appended to the first free slot" : "bumped into slot 1"}` +
+                  ` \u00b7 via ${r.transport}`, "ok");
         return true;
       }
       const detail = (job.stderr || job.stdout || "sampling tool failed").trim();
@@ -478,7 +484,7 @@
         url: pageUrl(),
         start: fmt(s.start),
         end: fmt(s.end),
-        deck: ui.deck,
+        mode: ui.mode,
         speed: rate.state().speed
       }
     });
@@ -508,7 +514,7 @@
       // context invalidated" inside a page that outlived the extension, and a
       // rejection nobody handles surfaces as an uncaught error in the console.
       chrome.storage.local.set({ spottytube: {
-        deck: ui.deck, collapsed: ui.collapsed, left: ui.left, top: ui.top,
+        mode: ui.mode, collapsed: ui.collapsed, left: ui.left, top: ui.top,
         speed: sp.speed, snap: sp.snap, player: sp.player
       } }, () => { void chrome.runtime.lastError; });
     } catch { /* ignore */ }
@@ -637,7 +643,7 @@
     chrome.storage.local.get("spottytube", (saved) => {
       const s = saved && saved.spottytube;
       if (s) {
-        ui.deck = s.deck === "b" ? "b" : "a";
+        ui.mode = s.mode === "append" ? "append" : "bump";
         ui.collapsed = Boolean(s.collapsed);
         rate.restore(s);
         if (typeof s.left === "number" && typeof s.top === "number") place(s.left, s.top);
