@@ -81,8 +81,8 @@ class TestParsing(unittest.TestCase):
                 bridge.parse_time(bad)
 
     def test_extract_json_skips_preamble(self):
-        stdout = 'card: /x (ready)\nnote: hello\n{\n  "deck": "A"\n}\n'
-        self.assertEqual(bridge.extract_json(stdout), {"deck": "A"})
+        stdout = 'card: /x (ready)\nnote: hello\n{\n  "tape": "B"\n}\n'
+        self.assertEqual(bridge.extract_json(stdout), {"tape": "B"})
         self.assertIsNone(bridge.extract_json("nothing here"))
 
 
@@ -138,8 +138,9 @@ class TestHealth(ServerCase):
 
 
 class TestSample(ServerCase):
-    # No deck in the payload: the GUI dropped deck selection because every
-    # save lands in the B G P R T Y tape chain, not in a particular deck.
+    # No deck and no mode in the payload: the GUI dropped deck selection
+    # entirely, and an omitted mode means "use the settings default", which
+    # the tool resolves per call (append unless the user changed it).
     payload = {"url": "https://www.youtube.com/watch?v=abcdefghijk",
                "start": "1:00", "end": "1:12"}
 
@@ -150,10 +151,9 @@ class TestSample(ServerCase):
 
         job = self.wait_job(body["job_id"])
         self.assertEqual(job["status"], "done")
-        self.assertEqual(job["result"]["deck"], "A")
         self.assertEqual(job["result"]["tape"], "B")
         self.assertEqual(job["result"]["slot"], 1)
-        self.assertEqual(job["result"]["mode"], "bump")
+        self.assertEqual(job["result"]["mode"], "append")
         self.assertEqual(job["exit_code"], 0)
 
     def test_tool_receives_exact_arguments(self):
@@ -164,22 +164,13 @@ class TestSample(ServerCase):
         self.assertEqual(argv, ["--url", self.payload["url"], "--start", "1:00",
                                 "--end", "1:12", "--json"])
 
-    def test_optional_deck_still_reaches_the_tool(self):
-        payload = dict(self.payload, deck="b")
-        status, body, _ = self.request("/sample", "POST", payload)
-        self.assertEqual(status, 202)
-        job = self.wait_job(body["job_id"])
-        self.assertEqual(job["result"]["slot"], 2)
-        argv = self.args_file.read_text().split("\n")
-        self.assertEqual(argv[argv.index("--deck") + 1], "b")
-
     # -- save mode ----------------------------------------------------------
 
-    def test_default_mode_is_bump_and_passes_no_flag(self):
+    def test_default_mode_is_append_and_passes_no_flag(self):
         status, body, _ = self.request("/sample", "POST", self.payload)
         self.assertEqual(status, 202, body)
         self.wait_job(body["job_id"])
-        self.assertEqual(body["meta"]["mode"], "bump")
+        self.assertEqual(body["meta"]["mode"], "append")
         self.assertNotIn("--mode", self.args_file.read_text().split("\n"))
 
     def test_append_mode_reaches_the_tool(self):
@@ -210,11 +201,6 @@ class TestSample(ServerCase):
         status, body, _ = self.request("/sample", "POST", payload)
         self.assertEqual(status, 400)
         self.assertIn("must be after start", body["error"])
-
-    def test_bad_deck_is_rejected(self):
-        status, body, _ = self.request("/sample", "POST", dict(self.payload, deck="c"))
-        self.assertEqual(status, 400)
-        self.assertIn("deck", body["error"])
 
     def test_non_http_url_is_rejected(self):
         for url in ("file:///etc/passwd", "/etc/passwd", "--help"):
@@ -324,6 +310,64 @@ class TestToken(ServerCase):
         status, body, _ = self.request("/health", headers={"X-Spottytube-Token": "s3cret"})
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
+
+
+class TestRestart(ServerCase):
+    """POST /restart: answer first, then exit non-zero so systemd brings it back.
+
+    The installed unit runs Restart=on-failure, RestartSec=2, so a non-zero
+    exit IS the restart mechanism — no systemctl child process to outlive the
+    cgroup kill. Under systemd a service process carries INVOCATION_ID; its
+    absence means a manual run, where exiting would just kill the bridge.
+    """
+
+    def setUp(self):
+        super().setUp()
+        os.environ.pop("INVOCATION_ID", None)
+
+    def tearDown(self):
+        os.environ.pop("INVOCATION_ID", None)
+        super().tearDown()
+
+    def test_under_systemd_is_true_only_with_an_invocation_id(self):
+        self.assertTrue(bridge.under_systemd({"INVOCATION_ID": "abc"}))
+        self.assertFalse(bridge.under_systemd({}))
+
+    def test_the_restart_exit_code_is_nonzero_so_on_failure_picks_it_up(self):
+        self.assertNotEqual(bridge.EXIT_RESTART, 0)
+
+    def test_schedule_restart_calls_exit_with_the_restart_code(self):
+        calls = []
+        bridge.schedule_restart(exit_fn=calls.append, delay=0.01)
+        time.sleep(0.3)
+        self.assertEqual(calls, [bridge.EXIT_RESTART])
+
+    def test_refused_when_not_running_under_systemd(self):
+        status, body, _ = self.request("/restart", "POST")
+        self.assertEqual(status, 409)
+        self.assertFalse(body["ok"])
+        self.assertIn("systemd", body["error"])
+        status, body, _ = self.request("/health")
+        self.assertEqual(status, 200, "the server must survive a refused restart")
+
+    def test_under_systemd_it_answers_ok_then_schedules_the_exit(self):
+        os.environ["INVOCATION_ID"] = "test-invocation"
+        scheduled = []
+        original = bridge.schedule_restart
+        bridge.schedule_restart = lambda *a, **kw: scheduled.append((a, kw))
+        try:
+            status, body, _ = self.request("/restart", "POST")
+        finally:
+            bridge.schedule_restart = original
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["restarting"])
+        self.assertEqual(len(scheduled), 1)
+
+    def test_health_reports_the_version_so_the_widget_can_show_it(self):
+        status, body, _ = self.request("/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["version"], bridge.VERSION)
 
 
 if __name__ == "__main__":

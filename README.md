@@ -112,6 +112,13 @@ pipeline needs no change).
 - Green dot: the bridge is up and something can take a sample. Red dot: the
   bridge is down, or neither USB nor a card is available (the Send button is
   disabled). It re-checks every 20 s.
+- **Gear button** opens the settings panel: every setting from
+  `tools/settings.py` rendered from the schema the bridge serves (labels,
+  controls, ranges, hover help). Save validates, stores and applies without a
+  restart. **Restart bridge service** at the bottom restarts the systemd unit
+  so the bridge reloads the code on disk — use it after editing bridge or tool
+  code, since a running service keeps the build it started with. The panel
+  waits for the service to come back and re-syncs, showing the new version.
 - Drag the title bar to move it; position, save mode, collapsed state, speed
   and snap persist.
 
@@ -127,14 +134,15 @@ whose stored length is over 42 s.
 Tapes play in device order B G P R T Y, six slots each, files always named
 `1.WAV` .. `6.WAV` — the whole device is one chain of 36 slots.
 
-**Bump** (the default): the new sample takes slot 1 of the target tape and
+**Bump**: the new sample takes slot 1 of the target tape and
 every occupied slot behind it moves one place down the chain — `1.WAV` bumps
 into `2.WAV`, `B/6.WAV` bumps into `G/1.WAV`, and so on, each file renamed to
 its new slot. A file can only fall off the chain when the very last slot,
 `Y/6`, is full; otherwise it always lands in the next directory in order.
 
-**Append**: the new sample takes the first free slot on the chain and nothing
-moves. A completely full chain is reported as an error instead of bumping.
+**Append** (the default): the new sample takes the first free slot on the
+chain and nothing moves. A completely full chain is reported as an error
+instead of bumping.
 
 Nothing is deleted. The file pushed off `Y/6` is renamed with a timestamp and
 saved to the card ROOT as `<tape>_6_<YYYYmmdd-HHMMSS>.WAV`; over USB, where
@@ -148,9 +156,15 @@ silence.
 
 ## Bridge API
 
-    GET  /health        {"ok":true,"tool_present":true,"card":"/media/...","pending_jobs":0}
+    GET  /health        {"ok":true,"version":"0.2.0","tool_present":true,"card":"/media/...","pending_jobs":0}
     GET  /status        {"ok":true,"ready":true,"transport":"usb","usb":{...},"card":{...}}
     GET  /card          runs `sample_tool.py --check-card`
+    GET  /settings      {"ok":true,"settings":{...},"schema":[...],"sections":[...]}
+    POST /settings      partial or full values -> validated, stored, hot-applied
+                        {"ok":true,"settings":{...},"card_config":...,"restart_needed":false}
+    POST /restart       answers {"ok":true,"restarting":true}, then exits 70 so
+                        systemd's Restart=on-failure reloads the code on disk;
+                        409 when not running under systemd (manual run)
     POST /sample        {"url","start","end"} -> 202 {"job_id"}
                         optional: "mode" ("bump"|"append"), "speed",
                         "source" ("generic"|"youtube"), "transport"
@@ -175,13 +189,18 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -v            # 129 python tests
+    python3 -m unittest discover -s tests -v            # 163 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 57 widget tests
+                tests/test_widget_wiring.mjs            # 65 widget tests
 
-- `tests/test_bridge.py` — 32 tests, real HTTP against `tests/stub_tool.py`, so
+- `tests/test_bridge.py` — 36 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
+- `tests/test_settings.py` — 30 tests: every schema field carries hover help
+  and its constraints, a missing/corrupt/partial file degrades to defaults per
+  key, validation enforces select choices, number ranges and cross-field rules
+  (speed envelope, MIDI channels differ, `tool_path` ends in `.py`), saves are
+  atomic round-trips, and `SPOTTYTUBE_SETTINGS` overrides the path.
 - `tests/test_sample_tool.py` — 65 tests: time parsing, generic source ids,
   transport choice, and placement on the tape chain against a real directory
   tree (bump cascades across tapes, append finds the first free slot, only a
@@ -203,8 +222,10 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
   expiry). `tests/test_widget_wiring.mjs` guards the contract between
   `content.js` and the files it loads: script order in the manifest, the slider
   range, the snap control, `speed` in the sample payload, `playbackRate`
-  polling, persistence, and the countdown wiring (arm on in-point, auto
-  out-point on elapse, flash classes, teardown).
+  polling, persistence, the countdown wiring (arm on in-point, auto
+  out-point on elapse, flash classes, teardown), the settings panel (row
+  labels bound to controls, scrolling body, pinned footer, viewport clamp)
+  and the restart flow (worker posts `/restart`, waits for health, re-syncs).
 
 The two upstream tests skip themselves when GitHub is unreachable; everything
 local, including the ffmpeg conversion, always runs.
@@ -241,6 +262,7 @@ skipped instead of aborting the card scan.
     installers/browsers.sh         native/snap/Flatpak detection, sourced by install.sh
     INSTALL                        step by step guide for a first install
     tools/sample_tool.py           URL + range -> a slot on the instrument
+    tools/settings.py              settings schema + store, read by bridge and tool
     tools/sk_usb.py                USB transport (raw termios + amidi, stdlib)
     tools/sk_install.py            transport contract + tape-chain placement
     tools/fetch_wav_builder.py     fetches the upstream wav_builder dependency

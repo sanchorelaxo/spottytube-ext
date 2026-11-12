@@ -75,13 +75,16 @@ test("speed and snap survive a reload", () => {
   assert.match(content, /rate\.restore\(s\)/);
 });
 
-test("the widget offers a save mode, not a deck choice", () => {
+test("the widget offers neither a deck choice nor a save-mode row", () => {
+  // Mode moved to the settings panel (B1) and decks are gone entirely.
   assert.doesNotMatch(content, /data-deck=/);
-  assert.match(content, /data-mode="bump"/);
-  assert.match(content, /data-mode="append"/);
+  assert.doesNotMatch(content, /data-mode=/);
+  assert.match(content, /class="gear"/);
+  assert.match(content, /panel settings/);
   const payload = content.slice(content.indexOf("type: \"sample\""));
-  assert.match(payload, /mode:\s*ui\.mode/);
-  assert.doesNotMatch(payload.slice(0, payload.indexOf("});")), /deck:/);
+  const sent = payload.slice(0, payload.indexOf("});"));
+  assert.doesNotMatch(sent, /deck:/);
+  assert.doesNotMatch(sent, /mode:/);
 });
 
 test("a done job reports the on-unit tape path, not a generated wav path", () => {
@@ -90,9 +93,13 @@ test("a done job reports the on-unit tape path, not a generated wav path", () =>
   assert.doesNotMatch(content, /r\.track/);
 });
 
-test("the save mode survives a reload", () => {
-  assert.match(content, /mode: ui\.mode, collapsed/);
-  assert.match(content, /s\.mode === "append"/);
+test("cached settings survive a reload", () => {
+  // The widget state no longer carries a mode; settings are cached under
+  // their own key and re-applied (including the stored default mode) on load.
+  assert.doesNotMatch(content, /mode: ui\.mode/);
+  assert.match(content, /spottytubeSettings: cfg/);
+  assert.match(content, /\["spottytube", "spottytubeSettings"\]/);
+  assert.match(content, /applySettings\(/);
 });
 
 // --- countdown to the auto out-point ---------------------------------------
@@ -135,4 +142,78 @@ test("the countdown ticker checks alive() and is cleared on teardown", () => {
   assert.match(content, /clearInterval\(cdTimer\)/);
   const tick = content.slice(content.indexOf("function tickCountdown"));
   assert.match(tick, /if \(!alive\(\)\)/);
+});
+
+// --- labels and the bridge restart button ----------------------------------
+
+const background = readFileSync(join(ext, "background.js"), "utf8");
+
+test("every settings row label points at its own control", () => {
+  // Brave flags "<label> isn't associated with a form field": an unassociated
+  // label is a dead click target and an a11y error on every rendered row.
+  assert.match(content, /input\.id = `spottytube-set-\$\{field\.key\}`/);
+  assert.match(content, /label\.htmlFor = input\.id/);
+});
+
+test("the readout cells pair label and output with for/id", () => {
+  assert.match(content, /<label for="spottytube-out-start">START<\/label><output id="spottytube-out-start">/);
+  assert.match(content, /<label for="spottytube-out-end">END<\/label><output id="spottytube-out-end">/);
+  assert.match(content, /<label for="spottytube-out-len">LEN<\/label><output id="spottytube-out-len">/);
+  assert.doesNotMatch(content, /<label>START<\/label>/);
+});
+
+test("the settings panel carries a restart-bridge button below the actions", () => {
+  const actions = content.indexOf('class="sactions"');
+  const restart = content.indexOf('class="s-restart"');
+  assert.ok(actions > -1, "settings actions row missing");
+  assert.ok(restart > actions, "restart row must sit under Save/Cancel");
+  assert.match(content, /Restart bridge service</);
+  assert.match(content, /srestart: root\.querySelector\("\.s-restart"\)/);
+});
+
+test("restarting asks the worker, waits for health, then re-syncs settings", () => {
+  assert.match(content, /type: "restart"/);
+  const fn = content.slice(content.indexOf("async function restartBridge"));
+  assert.match(fn, /type: "health"/);
+  assert.match(fn, /syncSettings\(\)/);
+  assert.match(fn, /back\.version/);
+});
+
+test("the worker posts /restart to the bridge", () => {
+  assert.match(background, /restart: \(\) => call\("\/restart", \{ method: "POST" \}\)/);
+});
+
+// --- the settings panel must fit the viewport: scroll body, pinned footer ---
+
+test("the settings panel is a flex column: scrolling body, pinned footer", () => {
+  // A max-height parent clips; only a flex column with min-height:0 on the
+  // body makes overflow-y:auto actually scroll (and keeps the buttons reachable).
+  assert.match(content, /\.panel\.settings\s*{[^}]*display:\s*flex;[^}]*flex-direction:\s*column/s);
+  assert.match(content, /\.panel\.settings\[hidden\]\s*{\s*display:\s*none;\s*}/);
+  assert.match(content, /\.sbody\s*{[^}]*overflow-y:\s*auto;[^}]*min-height:\s*0/s);
+  assert.match(content, /\.sfoot\s*{[^}]*flex:\s*none/s);
+  const iBody = content.indexOf('<div class="sbody">');
+  const iFields = content.indexOf('<div class="sfields">');
+  const iFoot = content.indexOf('<div class="sfoot">');
+  const iSave = content.indexOf('class="s-save"');
+  const iRestart = content.indexOf('class="s-restart"');
+  assert.ok(iBody > -1, "sbody exists");
+  assert.ok(iFields > iBody, "fields live inside the scrolling body");
+  assert.ok(iFoot > iFields, "the footer comes after the scrolling body");
+  assert.ok(iSave > iFoot && iRestart > iSave, "save and restart are pinned in the footer");
+});
+
+test("the scrolling body carries a visible scrollbar", () => {
+  assert.match(content, /\.sbody\s*{[^}]*scrollbar-width:\s*thin/s);
+  assert.match(content, /\.sbody::-webkit-scrollbar\s*{/);
+});
+
+test("opening settings clamps the tall panel back into the viewport", () => {
+  // The copied drag anchor was clamped for the small widget, not the tall
+  // panel: dragged low, Save/Cancel/Restart land under the viewport edge.
+  assert.match(content, /function clampIntoView\(/);
+  assert.match(content, /clampIntoView\(el\.settings\)/);
+  const fn = content.slice(content.indexOf("function clampIntoView"), content.indexOf("function clampIntoView") + 900);
+  assert.match(fn, /getBoundingClientRect/);
+  assert.match(fn, /innerHeight/);
 });

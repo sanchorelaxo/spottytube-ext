@@ -9,6 +9,25 @@
   var DANGER_SECONDS = 5;  // red-flash window at the end of the count
   var FLASH_MS = 500;      // the flash flips phase every half second
 
+  // The two timing knobs are widget-scope settings (D1/D2); the settings
+  // panel narrows or widens them at runtime and the next countdown tick sees
+  // the new values. MAX_LOOP is fixed by the firmware and stays put.
+  function setDangerSeconds(value) {
+    var seen = Number(value);
+    if (isFinite(seen) && seen >= 1 && seen <= MAX_LOOP) {
+      DANGER_SECONDS = Math.round(seen);
+    }
+    return DANGER_SECONDS;
+  }
+
+  function setFlashMs(value) {
+    var seen = Number(value);
+    if (isFinite(seen) && seen >= 100 && seen <= 5000) {
+      FLASH_MS = Math.round(seen);
+    }
+    return FLASH_MS;
+  }
+
   // The cap is on the range you pick and it does not move with the speed. A
   // slowed range can still overflow the 42 s the deck stores, but that check
   // belongs to whoever knows the speed, not here.
@@ -108,10 +127,21 @@
   var api = {
     createPair: createPair,
     createCountdown: createCountdown,
+    setDangerSeconds: setDangerSeconds,
+    setFlashMs: setFlashMs,
     MAX_LOOP: MAX_LOOP,
     DANGER_SECONDS: DANGER_SECONDS,
     FLASH_MS: FLASH_MS
   };
+
+  // Keep the exported constants honest after a setter runs.
+  function refreshExports() {
+    api.DANGER_SECONDS = DANGER_SECONDS;
+    api.FLASH_MS = FLASH_MS;
+  }
+  var _setDanger = setDangerSeconds, _setFlash = setFlashMs;
+  api.setDangerSeconds = function (value) { var r = _setDanger(value); refreshExports(); return r; };
+  api.setFlashMs = function (value) { var r = _setFlash(value); refreshExports(); return r; };
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = api;

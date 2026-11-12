@@ -411,8 +411,8 @@ class TestBuildSample(CardFixture):
         self.seed()
 
         result = sample_tool.build_sample(
-            str(source), "0:01", "0:02", True, card=self.root,
-            cache_dir=self.root / "cache", transport="card")
+            str(source), "0:01", "0:02", card=self.root,
+            cache_dir=self.root / "cache", transport="card", mode="bump")
 
         self.assertTrue(result.installed)
         self.assertEqual(result.transport, "card")
@@ -428,7 +428,7 @@ class TestBuildSample(CardFixture):
         self.seed()
 
         result = sample_tool.build_sample(
-            str(source), "0:00", "0:01", False, card=self.root,
+            str(source), "0:00", "0:01", card=self.root,
             cache_dir=self.root / "cache", install=False)
 
         self.assertFalse(result.installed)
@@ -439,7 +439,7 @@ class TestBuildSample(CardFixture):
         source.write_bytes(wav(1, seconds=1.0))
         with self.assertRaises(RuntimeError) as caught:
             sample_tool.build_sample(
-                str(source), "0:30", "0:31", True, card=self.root,
+                str(source), "0:30", "0:31", card=self.root,
                 cache_dir=self.root / "cache", install=False)
         self.assertIn("shorter than the requested range", str(caught.exception))
 
@@ -448,7 +448,7 @@ class TestBuildSample(CardFixture):
         source.write_bytes(wav(1, seconds=1.0))
         with self.assertRaises(ValueError) as caught:
             sample_tool.build_sample(
-                str(source), "0:00", "1:00", True, card=self.root,
+                str(source), "0:00", "1:00", card=self.root,
                 cache_dir=self.root / "cache", install=False)
         self.assertIn("42", str(caught.exception))
 
@@ -457,7 +457,7 @@ class TestBuildSample(CardFixture):
         source.write_bytes(wav(1, seconds=1.0))
         with self.assertRaises(ValueError):
             sample_tool.build_sample(
-                str(source), "0:00", "0:01", True, card=self.root,
+                str(source), "0:00", "0:01", card=self.root,
                 cache_dir=self.root / "cache", tape="Z", install=False)
 
 
@@ -534,7 +534,7 @@ class TestSpeedCut(CardFixture):
         if not source.exists():
             source.write_bytes(wav(1, seconds=seconds))
         return sample_tool.build_sample(
-            str(source), start, end or f"0:0{seconds:g}", True,
+            str(source), start, end or f"0:0{seconds:g}",
             card=self.root, cache_dir=self.root / "cache", install=False,
             speed=speed)
 
@@ -601,7 +601,7 @@ class TestSpeedCut(CardFixture):
         with contextlib.redirect_stderr(err):
             code = sample_tool.main([
                 "--url", str(source), "--start", "0:00", "--end", "0:01",
-                "--deck", "a", "--speed", "3", "--json"])
+                "--speed", "3", "--json"])
         self.assertEqual(code, 1)
         self.assertIn("0.25", err.getvalue())
 
@@ -643,7 +643,7 @@ class TestTransferDrop(CardFixture):
 
         with mock.patch.object(self.install, "open_transport", spy):
             sample_tool.build_sample(
-                str(source), "0:00", "0:02", True, card=self.root,
+                str(source), "0:00", "0:02", card=self.root,
                 cache_dir=self.root / "cache", install=True, transport="card")
 
         self.assertEqual(seen, {"slice_present": True})

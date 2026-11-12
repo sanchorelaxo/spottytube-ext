@@ -65,6 +65,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import sk_install  # noqa: E402
+import settings as st_settings  # noqa: E402
 import wav_builder as wb  # noqa: E402
 
 # Deck ceiling from the manual: 42 s max loop per deck.
@@ -152,7 +153,6 @@ class SampleResult:
     source_id: str | None
     start: float
     end: float
-    deck: str
     tape: str
     slot: int
     segment_path: Path
@@ -162,7 +162,7 @@ class SampleResult:
     archived: Path | None = None
     card_path: Path | None = None
     speed: float = 1.0
-    mode: str = "bump"
+    mode: str = "append"
 
     def as_dict(self):
         return {
@@ -170,7 +170,6 @@ class SampleResult:
             "source_id": self.source_id,
             "start": self.start,
             "end": self.end,
-            "deck": self.deck,
             "tape": self.tape,
             "slot": self.slot,
             "segment": str(self.segment_path),
@@ -532,8 +531,13 @@ def require_card(card=None, search_roots=None):
 
 # --- media ---------------------------------------------------------------
 
-def ensure_source(url, cache_dir, source=None):
-    """Return ``(local_path, id)``; downloads once and reuses the cache."""
+def ensure_source(url, cache_dir, source=None, download_format=None):
+    """Return ``(local_path, id)``; downloads once and reuses the cache.
+
+    ``download_format`` is the yt-dlp ``-f`` selector; it defaults to the
+    ``download_format`` setting (schema default ``bestaudio``), read per call
+    so a settings save applies to the next download without a restart.
+    """
     path = Path(str(url))
     if path.exists():
         return path, None
@@ -550,8 +554,9 @@ def ensure_source(url, cache_dir, source=None):
     if cached:
         return cached[0], sid
 
+    fmt = download_format or st_settings.load().get("download_format") or "bestaudio"
     tool = resolve_downloader()
-    cmd = [str(tool), "--no-warnings", "-f", "bestaudio",
+    cmd = [str(tool), "--no-warnings", "-f", fmt,
            "-o", str(cache_dir / f"{sid}.%(ext)s")]
     node = node_binary()
     if node is not None:
@@ -575,11 +580,15 @@ def wav_seconds(path):
     return frames / wb.SAMPLE_RATE
 
 
-def extract_segment(src, dst, start, seconds):
+def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0):
     """Cut ``[start, start+seconds)`` and write a native Spotykach WAV.
 
     No speed is applied here: this is the plain slice, capped at the deck's
     loop length. :func:`retime_segment` is the pass that re-times it.
+
+    ``loudnorm`` runs ffmpeg's EBU R128 filter over the cut so every sample
+    lands at the same perceived loudness; ``loudnorm_i`` is the target in
+    LUFS (TP -1.5, LRA 11 are the customary companions).
 
     Enforces the deck's loop ceiling here as well as in :func:`build_sample`, so
     a direct library call cannot produce a file the hardware would silently cut.
@@ -596,6 +605,10 @@ def extract_segment(src, dst, start, seconds):
         wb.ffmpeg(), "-y", "-loglevel", "error",
         "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
         "-i", str(src),
+    ]
+    if loudnorm:
+        cmd += ["-af", f"loudnorm=I={float(loudnorm_i):g}:TP=-1.5:LRA=11"]
+    cmd += [
         "-c:a", wb.PCM_FMT, "-ar", str(wb.SAMPLE_RATE), "-ac", str(wb.CHANNELS),
         str(rough),
     ]
@@ -634,7 +647,10 @@ def retime_video_filter(speed):
     return f"setpts={1.0 / speed:.6g}*PTS"
 
 
-def retime_segment(src, dst, speed):
+SPEED_METHODS = ("atempo", "varispeed")
+
+
+def retime_segment(src, dst, speed, method="atempo"):
     """Re-record ``src`` at ``speed``, writing the sample the deck stores.
 
     A second ffmpeg pass over the already-sliced segment, exactly like
@@ -644,10 +660,21 @@ def retime_segment(src, dst, speed):
     and it is what applies here because a Spotykach sample is a bare 48 kHz
     float WAV with no video stream.
 
-    1x copies the cut through untouched: no resample, no generation loss.
+    ``method``:
+        atempo      time-stretch, pitch stays put (default)
+        varispeed   pitch follows speed, like a tape slowing down —
+                    ``asetrate`` re-reads the stream at a different clock and
+                    ``aresample`` brings it back to 48 kHz
+
+    Both produce the same duration on the deck. 1x copies the cut through
+    untouched under either method: no resample, no generation loss.
     """
     src, dst = Path(src), Path(dst)
     speed = validate_speed(speed)
+    if method not in SPEED_METHODS:
+        raise ValueError(
+            f"unknown speed method {method!r} ({' or '.join(SPEED_METHODS)})"
+        )
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     if abs(speed - 1.0) < 1e-9:
@@ -663,11 +690,15 @@ def retime_segment(src, dst, speed):
             f"{MAX_LOOP_SECONDS:g}s max — shorten the range or raise the speed"
         )
 
+    if method == "varispeed":
+        af = f"asetrate={wb.SAMPLE_RATE * speed:g},aresample={wb.SAMPLE_RATE}"
+    else:
+        af = ",".join(atempo_chain(speed))
     rough = dst.with_name(dst.stem + ".retime.wav")
     cmd = [
         wb.ffmpeg(), "-y", "-loglevel", "error",
         "-i", str(src),
-        "-af", ",".join(atempo_chain(speed)),
+        "-af", af,
         "-c:a", wb.PCM_FMT, "-ar", str(wb.SAMPLE_RATE), "-ac", str(wb.CHANNELS),
         str(rough),
     ]
@@ -791,14 +822,22 @@ def deliver(transport, card_root, tape, data, archive_dir, mode="bump", attempts
     raise last
 
 
-def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
+def build_sample(url, start, end, card=None, cache_dir=None,
                  search_roots=None, install=True, source=None, transport=None,
-                 tape=None, archive_dir=None, speed=1.0, mode="bump"):
+                 tape=None, archive_dir=None, speed=1.0, mode=None,
+                 download_format=None, speed_method=None, loudnorm=None,
+                 loudnorm_i=None):
     """Build a segment and (by default) install it on the instrument.
 
     ``start``/``end`` accept ``SS``/``MM:SS``/``HH:MM:SS``. When ``url`` is an
     existing local file the download step is skipped, which is what the tests
     use and what makes offline use possible.
+
+    Arguments left at ``None`` (``mode``, ``transport``, ``tape``,
+    ``cache_dir``, ``download_format``, ``speed_method``, ``loudnorm``,
+    ``loudnorm_i``) resolve from the settings file — read per call, so a
+    settings save takes effect on the next build without any restart. An
+    explicit argument always wins, which is what CLI flags pass through.
 
     ``speed`` is the playback rate the range was heard at (0.25x-2x, 1x
     default). It is applied as a second pass over the sliced segment, so the
@@ -809,6 +848,11 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
     the unit leaves transfer mode on its own after a few seconds of silence.
     USB first, the card second, unless ``transport`` names one.
     """
+    cfg = st_settings.load()
+    if mode is None:
+        mode = cfg["default_mode"]
+    if transport is None:
+        transport = cfg["default_transport"] or "auto"
     start_s = parse_time(start)
     end_s = parse_time(end)
     if end_s <= start_s:
@@ -826,14 +870,19 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
             f"{MAX_LOOP_SECONDS:g}s max — shorten the range or raise the speed"
         )
 
-    target_tape = (tape or DEFAULT_TAPE).upper()
+    target_tape = (tape or cfg["default_tape"] or DEFAULT_TAPE).upper()
     if target_tape not in wb.TAPES:
         raise ValueError(
             f"tape {target_tape!r} is not one of {' '.join(sorted(wb.TAPES))}"
         )
     if mode not in ("bump", "append"):
         raise ValueError(f"unknown placement mode {mode!r} (bump or append)")
-    cache = Path(cache_dir) if cache_dir else DEFAULT_CACHE
+    cache = Path(cache_dir or cfg["cache_dir"] or DEFAULT_CACHE)
+    if loudnorm is None:
+        loudnorm = bool(cfg["loudnorm"])
+    if loudnorm_i is None:
+        loudnorm_i = cfg["loudnorm_i"]
+    speed_method = speed_method or cfg["speed_method"] or "atempo"
     archive = archive_dir or archive_target(card, cache)
 
     card_root = None
@@ -858,7 +907,8 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
                     "cannot deliver the sample — " + "; ".join(error.reasons)
                 ) from None
 
-    media, sid = ensure_source(url, cache, source=source)
+    media, sid = ensure_source(url, cache, source=source,
+                               download_format=download_format)
     label = sid or Path(media).stem
     rate_tag = "" if abs(speed - 1.0) < 1e-9 else f"_{speed:g}x"
     segment = cache / "segments" / f"{label}_{int(start_s)}-{int(end_s)}{rate_tag}.WAV"
@@ -866,14 +916,15 @@ def build_sample(url, start, end, is_deck_a, card=None, cache_dir=None,
     # the speed only decides how long the deck's copy of it lasts.
     cut = segment.with_name(segment.stem + ".cut.WAV")
     try:
-        extract_segment(media, cut, start_s, duration)
-        retime_segment(cut, segment, speed)
+        extract_segment(media, cut, start_s, duration,
+                        loudnorm=loudnorm, loudnorm_i=loudnorm_i)
+        retime_segment(cut, segment, speed, method=speed_method)
     finally:
         cut.unlink(missing_ok=True)
 
     result = SampleResult(
         source=str(url), source_id=sid, start=start_s, end=end_s,
-        deck="A" if is_deck_a else "B", tape=target_tape, slot=1,
+        tape=target_tape, slot=1,
         segment_path=segment, installed=False, speed=speed, mode=mode,
     )
     if not install:
@@ -965,25 +1016,41 @@ def main(argv=None):
                              f"default {DEFAULT_SOURCE})")
     parser.add_argument("--start", help="SS, MM:SS or HH:MM:SS")
     parser.add_argument("--end", help="SS, MM:SS or HH:MM:SS")
-    parser.add_argument("--deck", choices=["a", "b"],
-                        help="optional deck label kept for old CLI wrappers; "
-                             "the GUI no longer picks a deck — every save "
-                             "lands on the B G P R T Y chain")
-    parser.add_argument("--mode", choices=["bump", "append"], default="bump",
+    parser.add_argument("--mode", choices=["bump", "append"], default=None,
                         help="bump: slot 1, everything behind it moves one "
                              "slot down B G P R T Y, and only what falls off "
                              "Y/6 is archived to the card root; append: first "
-                             "free slot, nothing moves (default bump)")
-    parser.add_argument("--tape", default=DEFAULT_TAPE,
+                             "free slot, nothing moves (default from "
+                             "settings: append)")
+    parser.add_argument("--tape", default=None,
                         help=f"tape to write ({' '.join(sorted(wb.TAPES))}; "
-                             f"default {DEFAULT_TAPE})")
-    parser.add_argument("--transport", choices=["auto", "usb", "card"], default="auto",
-                        help="delivery path (default auto: usb, then card)")
+                             f"default from settings: {DEFAULT_TAPE})")
+    parser.add_argument("--transport", choices=["auto", "usb", "card"], default=None,
+                        help="delivery path (default from settings: auto — "
+                             "usb, then card)")
     parser.add_argument("--speed", type=float, default=1.0,
                         help="playback rate the range was heard at "
                              f"({MIN_SPEED:g}-{MAX_SPEED:g}; default 1.0)")
+    parser.add_argument("--download-format", default=None,
+                        help="yt-dlp -f selector for the source download "
+                             "(default from settings: bestaudio)")
+    parser.add_argument("--speed-method", choices=list(SPEED_METHODS), default=None,
+                        help="how a speed change is baked in: atempo keeps "
+                             "pitch, varispeed shifts pitch with speed "
+                             "(default from settings: atempo)")
+    parser.add_argument("--loudnorm", dest="loudnorm", action="store_true",
+                        default=None,
+                        help="normalize loudness via ffmpeg loudnorm "
+                             "(default from settings: off)")
+    parser.add_argument("--no-loudnorm", dest="loudnorm", action="store_false",
+                        help="disable loudness normalization for this run")
+    parser.add_argument("--loudnorm-i", type=float, default=None,
+                        help="loudnorm target in LUFS (default from "
+                             "settings: -16)")
     parser.add_argument("--card", help="card mount point (auto-detected if omitted)")
-    parser.add_argument("--cache-dir", help=f"download cache (default {DEFAULT_CACHE})")
+    parser.add_argument("--cache-dir", default=None,
+                        help=f"download cache (default from settings: "
+                             f"{DEFAULT_CACHE})")
     parser.add_argument("--archive-dir", help="where samples that fall off a tape go")
     parser.add_argument("--check-card", action="store_true",
                         help="only report whether the SD card is ready, then exit")
@@ -1012,10 +1079,13 @@ def main(argv=None):
 
     try:
         result = build_sample(
-            args.url, args.start, args.end, (args.deck or "a") == "a",
+            args.url, args.start, args.end,
             card=args.card, cache_dir=args.cache_dir, source=args.source,
             transport=args.transport, tape=args.tape, archive_dir=args.archive_dir,
             speed=args.speed, mode=args.mode,
+            download_format=args.download_format,
+            speed_method=args.speed_method,
+            loudnorm=args.loudnorm, loudnorm_i=args.loudnorm_i,
         )
     except (ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)

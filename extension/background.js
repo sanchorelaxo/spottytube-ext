@@ -44,6 +44,9 @@ const handlers = {
   health: () => call("/health"),
   status: () => call("/status"),
   card: () => call("/card"),
+  settings: () => call("/settings"),
+  settingsSave: (msg) => call("/settings", { method: "POST", body: JSON.stringify(msg.payload) }),
+  restart: () => call("/restart", { method: "POST" }),
   sample: (msg) => call("/sample", { method: "POST", body: JSON.stringify(msg.payload) }),
   job: (msg) => call(`/jobs/${encodeURIComponent(msg.job_id)}`)
 };

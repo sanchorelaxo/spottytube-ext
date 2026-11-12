@@ -7,7 +7,7 @@ can hand a time range to the Spotykach.
 
     POST /sample   {"url","start","end"}  -> 202 {"job_id"}
                    optional "mode" ("bump"|"append"), "speed", "source",
-                   "transport", "tape", "deck" (legacy label)
+                   "transport", "tape"
     GET  /jobs/<id>                              -> job state, result, output
     GET  /status                                 -> which transports work now
     GET  /card                                   -> `sample_tool.py --check-card`
@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
 
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 # The tool ships with the project (tools/sample_tool.py + tools/wav_builder.py
@@ -53,6 +53,12 @@ DEFAULT_PORT = 8765
 # still override it.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TOOL = PROJECT_ROOT / "tools" / "sample_tool.py"
+
+# The settings schema is the single source of truth shared with the tool and
+# the widget; wav_builder writes SK/config.txt for the device-scope keys.
+sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+import settings as app_settings  # noqa: E402
+import wav_builder as wav_builder_lib  # noqa: E402
 
 # Mirrors sample_tool.MAX_LOOP_SECONDS. Checked here so an impossible range
 # costs a 400 instead of a download.
@@ -235,13 +241,11 @@ def _validate(body):
     url = str(body.get("url", "")).strip()
     start = str(body.get("start", "")).strip()
     end = str(body.get("end", "")).strip()
-    # Deck is optional now: every save lands on the B G P R T Y tape chain, so
-    # the GUI no longer picks a deck. An explicit a/b still passes through for
-    # old CLI callers; anything else is refused.
-    deck = str(body.get("deck", "") or "").strip().lower() or None
-    # Placement on the chain: bump (slot 1, everything shifts down) is the
-    # default; append takes the first free slot and moves nothing.
-    mode = str(body.get("mode", "") or "").strip().lower() or "bump"
+    # Placement on the chain: bump (slot 1, everything shifts down) or append
+    # (first free slot, nothing moves). Omitted means "whatever the settings
+    # file says" — the tool resolves default_mode per call, so a settings save
+    # takes effect on the next save without touching the widget.
+    mode = str(body.get("mode", "") or "").strip().lower() or None
     # Optional pass-throughs. `source` stays a plain string so the bridge never
     # hardcodes a provider; the tool decides what it means and rejects unknowns.
     source = str(body.get("source", "") or "").strip().lower() or None
@@ -251,9 +255,7 @@ def _validate(body):
 
     if not url.startswith(("http://", "https://")):
         return None, "url must be an http(s) URL"
-    if deck is not None and deck not in ("a", "b"):
-        return None, "deck must be 'a' or 'b'"
-    if mode not in ("bump", "append"):
+    if mode is not None and mode not in ("bump", "append"):
         return None, "mode must be 'bump' or 'append'"
     if transport is not None and transport not in ("auto", "usb", "card"):
         return None, "transport must be 'auto', 'usb' or 'card'"
@@ -289,9 +291,31 @@ def _validate(body):
                       f"{plays:.2f}s; a deck holds {MAX_LOOP_SECONDS:g}s max")
 
     return {
-        "url": url, "start": start, "end": end, "deck": deck, "mode": mode,
+        "url": url, "start": start, "end": end, "mode": mode,
         "source": source, "transport": transport, "tape": tape, "speed": speed,
     }, None
+
+
+# -- service restart ---------------------------------------------------------
+# The systemd unit runs Restart=on-failure, RestartSec=2, so a controlled
+# non-zero exit IS the restart: no systemctl child process is spawned (one
+# would share the unit's cgroup and be killed by the very restart it tries
+# to trigger). The delay lets the HTTP response flush before the process dies.
+EXIT_RESTART = 70          # EX_SOFTWARE: non-zero, so on-failure restarts
+RESTART_DELAY = 0.5        # seconds between the response and the exit
+
+
+def under_systemd(env=None):
+    """True when this process was started by systemd (services get INVOCATION_ID)."""
+    return bool((os.environ if env is None else env).get("INVOCATION_ID"))
+
+
+def schedule_restart(exit_fn=None, delay=RESTART_DELAY):
+    """Exit with EXIT_RESTART after ``delay`` seconds; systemd brings us back."""
+    exit_fn = exit_fn or os._exit
+    timer = threading.Timer(delay, exit_fn, args=(EXIT_RESTART,))
+    timer.daemon = True
+    timer.start()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -416,6 +440,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": job["status"] == "done", **job})
             return
 
+        if path == "/settings":
+            # Schema + values: the widget renders the panel straight from this,
+            # so labels, controls, ranges and hover help all come from one file.
+            self._send(200, {"ok": True,
+                             "settings": app_settings.load(),
+                             "schema": app_settings.schema_json(),
+                             "sections": [list(s) for s in app_settings.SECTIONS]})
+            return
+
         self._send(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
@@ -425,7 +458,14 @@ class Handler(BaseHTTPRequestHandler):
         if self._denied():
             self._send(401, {"ok": False, "error": "missing or wrong token"})
             return
-        if self.path.split("?")[0].rstrip("/") != "/sample":
+        route = self.path.split("?")[0].rstrip("/")
+        if route == "/settings":
+            self._post_settings()
+            return
+        if route == "/restart":
+            self._post_restart()
+            return
+        if route != "/sample":
             self._send(404, {"ok": False, "error": "not found"})
             return
 
@@ -450,11 +490,11 @@ class Handler(BaseHTTPRequestHandler):
                 "--start", payload["start"],
                 "--end", payload["end"],
                 "--json"]
-        # Bump is the tool's default, so the flag only appears for append.
-        if payload["mode"] != "bump":
+        # The tool resolves omitted values (mode, tape, transport...) from the
+        # settings file per call, so --mode is only forwarded when the caller
+        # explicitly picked one.
+        if payload.get("mode"):
             argv += ["--mode", payload["mode"]]
-        if payload.get("deck"):
-            argv += ["--deck", payload["deck"]]
         for flag, key in (("--source", "source"),
                           ("--transport", "transport"),
                           ("--tape", "tape")):
@@ -463,8 +503,93 @@ class Handler(BaseHTTPRequestHandler):
         # 1x is the tool's default, so the flag only appears when it differs.
         if payload["speed"] != 1.0:
             argv += ["--speed", f"{payload['speed']:g}"]
-        job_id = store.submit(argv, payload)
-        self._send(202, {"ok": True, "job_id": job_id, "meta": payload})
+        meta = dict(payload)
+        if meta.get("mode") is None:
+            meta["mode"] = app_settings.load()["default_mode"]
+        job_id = store.submit(argv, meta)
+        self._send(202, {"ok": True, "job_id": job_id, "meta": meta})
+
+    def _post_settings(self):
+        """Validate, persist and hot-apply posted settings. No restart.
+
+        The token check in ``do_POST`` already ran. The posted object may be
+        partial: every field not mentioned keeps its current value, so the
+        widget can save a single section.
+        """
+        body, error = self._read_json()
+        if error:
+            self._send(400, {"ok": False, "error": error})
+            return
+        merged, errors = app_settings.validate(body)
+        if errors:
+            self._send(400, {"ok": False, "error": "; ".join(errors)})
+            return
+        tool_path = merged["tool_path"]
+        if tool_path and not Path(tool_path).is_file():
+            self._send(400, {"ok": False, "error":
+                             f"tool_path {tool_path!r} is not an existing file"})
+            return
+        app_settings.save(merged)
+        apply_runtime_settings(self.bridge, merged)
+
+        card_config = None
+        if any(key in body for key in app_settings.CARD_KEYS):
+            card_config = write_card_config(merged)
+        self._send(200, {"ok": True, "settings": app_settings.load(),
+                         "card_config": card_config, "restart_needed": False})
+
+    def _post_restart(self):
+        """Restart the bridge service: answer, then exit non-zero.
+
+        Only safe under systemd, whose ``Restart=on-failure`` turns the exit
+        into a fresh process running the current code on disk — the fix for
+        the "widget runs new code against an old server" trap. A manually
+        started bridge stays up and gets a 409 explaining why.
+        """
+        if not under_systemd():
+            self._send(409, {"ok": False, "error":
+                             "bridge is not running under systemd — "
+                             "restart it manually"})
+            return
+        self._send(200, {"ok": True, "restarting": True, "version": VERSION})
+        schedule_restart()
+
+
+def apply_runtime_settings(bridge, cfg):
+    """Hot-apply the bridge-scope keys to a running server.
+
+    ``tool_path`` swaps the script the job store shells out to on the *next*
+    submit; ``usb_port`` is exported so the next tool subprocess picks it up
+    (sk_usb reads SPOTTY_USB_PORT per call). Nothing restarts.
+    """
+    tool = (cfg.get("tool_path") or "").strip()
+    bridge.store.tool = Path(tool) if tool else Path(DEFAULT_TOOL)
+    port = (cfg.get("usb_port") or "").strip()
+    if port:
+        os.environ["SPOTTY_USB_PORT"] = port
+    else:
+        os.environ.pop("SPOTTY_USB_PORT", None)
+
+
+def write_card_config(cfg):
+    """Write the device-scope keys to SK/config.txt on a mounted card.
+
+    Returns a status dict for the response. When no card is mounted the
+    settings are already persisted — the answer says so instead of failing;
+    re-saving with a card present completes the write.
+    """
+    root = visible_card()
+    if not root:
+        return {"written": None,
+                "warning": "no card mounted — device settings are saved; "
+                           "insert the card and save again to write "
+                           "SK/config.txt"}
+    values = {key: int(cfg[key]) for key in app_settings.CARD_KEYS}
+    try:
+        written = wav_builder_lib.write_config(values, Path(root) / "SK")
+        return {"written": str(written)}
+    except (OSError, ValueError) as error:
+        return {"written": None, "error": str(error)}
 
 
 class BridgeServer(ThreadingHTTPServer):

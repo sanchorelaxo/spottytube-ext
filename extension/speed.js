@@ -11,6 +11,48 @@
   const STEP = 0.05;
   const DEFAULT_SPEED = 1;
 
+  // The absolute envelope the backend accepts (mirrors bridge/tool
+  // MIN_SPEED/MAX_SPEED). The settings panel can only narrow the slider
+  // inside this, never widen it.
+  const SPEED_ENV = { min: MIN_SPEED, max: MAX_SPEED };
+  const DEFAULT_UI = {
+    min: MIN_SPEED, max: MAX_SPEED, step: STEP, defaultSpeed: DEFAULT_SPEED,
+  };
+  const ui = { ...DEFAULT_UI };
+
+  function clampAbs(value) {
+    return Math.min(SPEED_ENV.max, Math.max(SPEED_ENV.min, value));
+  }
+
+  function clampUi(value) {
+    return Math.min(ui.max, Math.max(ui.min, value));
+  }
+
+  // Narrow the slider's working range (D3). Invalid or out-of-envelope
+  // values are ignored per field, so a bad settings payload can never push
+  // the widget past what the backend accepts.
+  function setUiEnvelope(next) {
+    const seen = next || {};
+    const num = (value) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const min = num(seen.min);
+    const max = num(seen.max);
+    const step = num(seen.step);
+    const dflt = num(seen.defaultSpeed != null ? seen.defaultSpeed : seen["default"]);
+    if (min != null && min >= SPEED_ENV.min && min <= SPEED_ENV.max) ui.min = min;
+    if (max != null && max >= SPEED_ENV.min && max <= SPEED_ENV.max) ui.max = max;
+    if (ui.min > ui.max) { ui.min = DEFAULT_UI.min; ui.max = DEFAULT_UI.max; }
+    if (step != null && step > 0 && step <= 1) ui.step = step;
+    if (dflt != null) ui.defaultSpeed = clampUi(clampAbs(dflt));
+    return uiEnvelope();
+  }
+
+  function uiEnvelope() {
+    return { ...ui };
+  }
+
   // Anything that is not a usable rate becomes 1x. Clamping to the range the
   // player offers means the widget can never ask ffmpeg for something absurd.
   function normalize(value) {
@@ -42,20 +84,20 @@
   function create(saved) {
     const initial = saved || {};
     const state = {
-      speed: normalize(initial.speed),
+      speed: clampUi(normalize(initial.speed)),
       snap: initial.snap === true,
       player: null,
     };
     if (initial.player != null) {
       const seen = Number(initial.player);
-      if (Number.isFinite(seen) && seen > 0) state.player = normalize(seen);
+      if (Number.isFinite(seen) && seen > 0) state.player = clampUi(normalize(seen));
     }
 
     // The slider. Ignored while snapped: the player is in charge then, and
     // fighting it would make the knob jump back on every tick.
     function set(value) {
       if (state.snap) return false;
-      state.speed = normalize(value);
+      state.speed = clampUi(normalize(value));
       return true;
     }
 
@@ -64,7 +106,7 @@
     function follow(rate) {
       const offered = Number(rate);
       if (!Number.isFinite(offered) || offered <= 0) return false;
-      state.player = normalize(offered);
+      state.player = clampUi(normalize(offered));
       if (!state.snap) return false;
       state.speed = state.player;
       return true;
@@ -78,7 +120,7 @@
       state.snap = true;
       const offered = rate == null ? state.player : Number(rate);
       if (offered != null && Number.isFinite(offered) && offered > 0) {
-        state.speed = normalize(offered);
+        state.speed = clampUi(normalize(offered));
       }
       return true;
     }
@@ -87,12 +129,12 @@
     // on top of whatever is there rather than replacing the object.
     function restore(saved) {
       const from = saved || {};
-      state.speed = normalize(from.speed);
+      state.speed = clampUi(normalize(from.speed));
       state.snap = from.snap === true;
       state.player = null;
       if (from.player != null) {
         const seen = Number(from.player);
-        if (Number.isFinite(seen) && seen > 0) state.player = normalize(seen);
+        if (Number.isFinite(seen) && seen > 0) state.player = clampUi(normalize(seen));
       }
       return state_();
     }
@@ -111,6 +153,7 @@
 
   const api = {
     MIN_SPEED, MAX_SPEED, STEP, DEFAULT_SPEED,
+    SPEED_ENV, DEFAULT_UI, setUiEnvelope, uiEnvelope,
     normalize, label, outputSeconds, fits, create,
   };
   if (typeof window !== "undefined") window.SpottySpeed = api;

@@ -19,7 +19,7 @@
   const RATE_MS = 500;
   const COUNTDOWN_MS = 200;
 
-  const ui = { mode: "bump", collapsed: false, left: null, top: null,
+  const ui = { collapsed: false, left: null, top: null,
              busy: false, timer: null, online: null, ready: false, transport: null };
 
   // --- page facts ---------------------------------------------------------
@@ -112,12 +112,6 @@
       .set.armed { background: #3ecf8e; }
       .set.holding { background: #e5484d; color: #fff; }
       .hint { font-size: 10.5px; color: #7d8494; text-align: center; margin-top: -3px; }
-      .moderow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-      .mode {
-        all: unset; text-align: center; cursor: pointer; padding: 6px 0; border-radius: 7px;
-        background: #0f1115; border: 1px solid #262a33; color: #98a0b0; font-size: 12px;
-      }
-      .mode.on { background: #24303f; border-color: #3c5070; color: #dfe8f5; font-weight: 600; }
       .speedrow {
         display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
       }
@@ -161,6 +155,76 @@
       .status.err { color: #ff8a8a; }
       .status.busy { color: #f5c451; }
       .status a { color: #7fb4ff; }
+
+      /* --- settings panel (gear button in the bar) ------------------------ */
+      .gear {
+        all: unset; cursor: pointer; color: #8b93a1; padding: 2px 4px;
+        font-size: 14px; line-height: 1; border-radius: 4px;
+      }
+      .gear:hover { color: #fff; background: #2a2e37; }
+      .panel.settings {
+        width: 330px; max-height: 78vh;
+        display: flex; flex-direction: column;
+      }
+      /* author display beats the UA [hidden] rule: the flex panel needs its
+         own hide or the settings sheet would sit open on every page load */
+      .panel.settings[hidden] { display: none; }
+      .panel.settings .bar { cursor: default; flex: none; }
+      .sbody {
+        padding: 10px 10px 6px; overflow-y: auto; min-height: 0; flex: 1 1 auto;
+        display: grid; gap: 4px; align-content: start;
+        scrollbar-width: thin; scrollbar-color: #3a404c #16181d;
+      }
+      .sbody::-webkit-scrollbar { width: 10px; }
+      .sbody::-webkit-scrollbar-track { background: #16181d; }
+      .sbody::-webkit-scrollbar-thumb {
+        background: #3a404c; border-radius: 5px; border: 2px solid #16181d;
+      }
+      .sbody::-webkit-scrollbar-thumb:hover { background: #4a515f; }
+      .sfoot {
+        flex: none; padding: 8px 10px 10px;
+        border-top: 1px solid #262a33; background: #16181d;
+      }
+      .ssec {
+        font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+        color: #7d8494; margin: 8px 0 2px;
+      }
+      .ssec:first-child { margin-top: 0; }
+      .srow { display: grid; grid-template-columns: 1fr 132px; gap: 8px; align-items: center; padding: 1px 0; }
+      .srow label { font-size: 11.5px; color: #d6dae2; cursor: help; }
+      .srow select, .srow input[type="number"], .srow input[type="text"] {
+        background: #0f1115; border: 1px solid #262a33; border-radius: 6px;
+        color: #f0f1f4; font: 12px/1.3 ui-monospace, SFMono-Regular, monospace;
+        padding: 4px 6px; box-sizing: border-box; width: 100%;
+      }
+      .srow select:focus, .srow input:focus { outline: none; border-color: #f5c451; }
+      .srow input[type="checkbox"] {
+        justify-self: start; width: 16px; height: 16px; accent-color: #3ecf8e; cursor: pointer;
+      }
+      .smsg { font-size: 11px; color: #98a0b0; white-space: pre-wrap; min-height: 14px; }
+      .smsg.ok { color: #3ecf8e; }
+      .smsg.err { color: #ff8a8a; }
+      .smsg.warn { color: #f5c451; }
+      .sactions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+      .s-save, .s-cancel {
+        all: unset; box-sizing: border-box; text-align: center; cursor: pointer;
+        padding: 8px; border-radius: 8px; font-weight: 600; font-size: 12px;
+      }
+      .s-save { background: #f5c451; color: #16181d; }
+      .s-save:hover:not(:disabled) { filter: brightness(1.08); }
+      .s-save:disabled { opacity: .5; cursor: default; }
+      .s-cancel { background: #2a2e37; color: #e8e9ec; border: 1px solid #363b46; }
+      .s-cancel:hover:not(:disabled) { background: #333844; }
+      .s-cancel:disabled { opacity: .5; cursor: default; }
+      .s-restart {
+        all: unset; box-sizing: border-box; display: block; width: 100%;
+        text-align: center; cursor: pointer; margin-top: 8px; padding: 7px 8px;
+        border-radius: 8px; font-weight: 600; font-size: 11px;
+        background: #20242c; color: #c9ced8; border: 1px solid #363b46;
+      }
+      .s-restart:hover:not(:disabled) { background: #2a2f3a; color: #fff; }
+      .s-restart:disabled { opacity: .5; cursor: default; }
+
       [hidden] { display: none !important; }
     </style>
     <div class="panel">
@@ -169,23 +233,18 @@
         <span class="name">SpottyTube</span>
         <span class="ver" title="extension version"></span>
         <span class="vid"></span>
+        <button class="gear" title="SpottyTube settings">&#9881;</button>
         <button class="fold" title="collapse">&#8211;</button>
       </div>
       <div class="body">
         <div class="times">
-          <div class="cell empty" data-k="start"><label>START</label><output>&#8211;&#8211;</output></div>
-          <div class="cell empty" data-k="end"><label>END</label><output>&#8211;&#8211;</output></div>
-          <div class="cell len"><label>LEN</label><output>&#8211;&#8211;</output></div>
+          <div class="cell empty" data-k="start"><label for="spottytube-out-start">START</label><output id="spottytube-out-start">&#8211;&#8211;</output></div>
+          <div class="cell empty" data-k="end"><label for="spottytube-out-end">END</label><output id="spottytube-out-end">&#8211;&#8211;</output></div>
+          <div class="cell len"><label for="spottytube-out-len">LEN</label><output id="spottytube-out-len">&#8211;&#8211;</output></div>
         </div>
         <div class="countdown" hidden><span class="cdlabel">AUTO-END IN</span><output>42s</output></div>
         <button class="set">SET START</button>
         <div class="hint">click: start, then end &middot; hold: reset</div>
-        <div class="moderow">
-          <button class="mode on" data-mode="bump"
-                  title="New sample takes slot 1. Everything behind it bumps one slot down B G P R T Y, each file renamed to its new slot. Only when Y/6 is full does the last file fall off &#8212; saved to the card root with a timestamp.">Bump &#183; slot 1</button>
-          <button class="mode" data-mode="append"
-                  title="New sample takes the first free slot on the chain, in B G P R T Y order. Nothing moves.">Append &#183; next free</button>
-        </div>
         <div class="speedrow">
           <input class="speed" type="range" min="0.25" max="2" step="0.05" value="1"
                  aria-label="playback speed">
@@ -194,6 +253,25 @@
         <button class="snap" aria-pressed="false"><span class="snapdot"></span><span class="snaptext">SNAP TO PLAYER</span></button>
         <button class="send" disabled>Send to deck</button>
         <div class="status"></div>
+      </div>
+    </div>
+    <div class="panel settings" hidden>
+      <div class="bar">
+        <span class="dot" hidden></span>
+        <span class="name">Settings</span>
+        <span class="vid" title="every setting applies on save &#8212; no restart">applies on save</span>
+        <button class="fold s-close" title="close settings">&#10005;</button>
+      </div>
+      <div class="sbody">
+        <div class="sfields"></div>
+      </div>
+      <div class="sfoot">
+        <div class="smsg"></div>
+        <div class="sactions">
+          <button class="s-save" title="validate, store and apply every setting now &#8212; takes effect on the next save, tick and config write, no restart">Save</button>
+          <button class="s-cancel" title="discard the changes and close">Cancel</button>
+        </div>
+        <button class="s-restart" title="restart the local bridge service so it reloads the code on disk &#8212; about 2s downtime; unsaved edits are reloaded from the bridge">Restart bridge service</button>
       </div>
     </div>
   `;
@@ -218,7 +296,14 @@
     snap: root.querySelector(".snap"),
     snaptext: root.querySelector(".snaptext"),
     status: root.querySelector(".status"),
-    modes: Array.from(root.querySelectorAll(".mode"))
+    gear: root.querySelector(".gear"),
+    settings: root.querySelector(".panel.settings"),
+    sfields: root.querySelector(".sfields"),
+    smsg: root.querySelector(".smsg"),
+    ssave: root.querySelector(".s-save"),
+    scancel: root.querySelector(".s-cancel"),
+    sclose: root.querySelector(".s-close"),
+    srestart: root.querySelector(".s-restart")
   };
 
   // --- rendering ----------------------------------------------------------
@@ -279,7 +364,6 @@
     el.send.disabled = !s.complete || overDeck || ui.busy || !ui.ready;
     el.send.textContent = ui.busy ? "Working\u2026" : "Send to deck";
 
-    el.modes.forEach((b) => b.classList.toggle("on", b.dataset.mode === ui.mode));
     el.vid.textContent = videoId() || "no video";
     el.panel.classList.toggle("collapsed", ui.collapsed);
     el.fold.innerHTML = ui.collapsed ? "+" : "&#8211;";
@@ -437,15 +521,321 @@
     host.addEventListener(name, (event) => event.stopPropagation());
   });
 
-  // --- save-mode choice -----------------------------------------------------
+  // --- settings panel ------------------------------------------------------
+  //
+  // One source of truth: the bridge serves the schema (labels, controls,
+  // ranges, hover help) next to the current values, and this panel renders
+  // straight from it — a setting added in tools/settings.py shows up here
+  // with no edit to this file. Values the widget itself consumes (countdown
+  // timing, speed envelope, send preferences) are applied the moment a save
+  // succeeds, and cached in chrome.storage.local so the page keeps behaving
+  // per the last known settings while the bridge is down.
 
-  el.modes.forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      ui.mode = button.dataset.mode;
+  const settingsState = {
+    open: false, busy: false,
+    schema: null, sections: [], values: null,
+    inputs: new Map(), fields: {}
+  };
+
+  function applySettings(cfg) {
+    if (!cfg) return;
+    try {
+      window.SpottySelection.setDangerSeconds(cfg.danger_seconds);
+      window.SpottySelection.setFlashMs(cfg.flash_ms);
+      window.SpottySpeed.setUiEnvelope({
+        min: cfg.speed_min, max: cfg.speed_max,
+        step: cfg.speed_step, defaultSpeed: cfg.speed_default
+      });
+      const env = window.SpottySpeed.uiEnvelope();
+      el.speed.min = String(env.min);
+      el.speed.max = String(env.max);
+      el.speed.step = String(env.step);
+      rate.set(rate.state().speed);   // re-clamp into the new envelope
       render();
-      persist();
+    } catch { /* setters refuse bad values; the widget runs on built-ins */ }
+  }
+
+  function cacheSettings(cfg) {
+    if (!alive() || !cfg) return;
+    try {
+      chrome.storage.local.set({ spottytubeSettings: cfg },
+        () => { void chrome.runtime.lastError; });
+    } catch { /* ignore */ }
+  }
+
+  async function syncSettings() {
+    const reply = await ask({ type: "settings" });
+    if (reply.ok) {
+      settingsState.schema = reply.schema || null;
+      settingsState.sections = reply.sections || [];
+      settingsState.values = reply.settings || null;
+      cacheSettings(reply.settings);
+      applySettings(reply.settings);
+    }
+    return reply;
+  }
+
+  function setSMsg(text, kind) {
+    el.smsg.textContent = text || "";
+    el.smsg.className = "smsg" + (kind ? " " + kind : "");
+  }
+
+  // One settings row: the label carries the schema's help text as its hover
+  // description, and the control follows the schema's `control` field.
+  function fieldRow(field, value) {
+    const node = document.createElement("div");
+    node.className = "srow";
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    if (field.help) {
+      label.title = field.help;   // on-hover description
+      node.title = field.help;
+    }
+    let input;
+    if (field.control === "select") {
+      input = document.createElement("select");
+      (field.choices || []).forEach((choice) => {
+        const opt = document.createElement("option");
+        opt.value = String(choice.value);
+        opt.textContent = choice.label || String(choice.value);
+        input.appendChild(opt);
+      });
+      input.value = value == null ? "" : String(value);
+    } else if (field.control === "checkbox") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = Boolean(value);
+    } else if (field.control === "number") {
+      input = document.createElement("input");
+      input.type = "number";
+      if (field.min != null) input.min = String(field.min);
+      if (field.max != null) input.max = String(field.max);
+      if (field.step != null) input.step = String(field.step);
+      input.value = value == null ? "" : String(value);
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+      input.value = value == null ? "" : String(value);
+    }
+    // Brave logs "<label> isn't associated with a form field" for a label with
+    // no control; htmlFor/id also makes the label a click target for the input.
+    input.id = `spottytube-set-${field.key}`;
+    label.htmlFor = input.id;
+    node.appendChild(label);
+    node.appendChild(input);
+    return { node, input };
+  }
+
+  function sectionOrder(schema) {
+    if (settingsState.sections.length) return settingsState.sections;
+    const seen = [];
+    schema.forEach((field) => {
+      if (!seen.some((entry) => entry[0] === field.section)) {
+        seen.push([field.section, field.section]);
+      }
     });
+    return seen;
+  }
+
+  function renderFields() {
+    el.sfields.innerHTML = "";
+    settingsState.inputs.clear();
+    settingsState.fields = {};
+    const schema = settingsState.schema;
+    const values = settingsState.values;
+    if (!schema || !values) {
+      el.ssave.disabled = true;
+    } else {
+      el.ssave.disabled = false;
+      sectionOrder(schema).forEach((section) => {
+        const fields = schema.filter((field) => field.section === section[0]);
+        if (!fields.length) return;
+        const head = document.createElement("div");
+        head.className = "ssec";
+        head.textContent = section[1];
+        el.sfields.appendChild(head);
+        fields.forEach((field) => {
+          settingsState.fields[field.key] = field;
+          const row = fieldRow(field, values[field.key]);
+          settingsState.inputs.set(field.key, row.input);
+          el.sfields.appendChild(row.node);
+        });
+      });
+    }
+    clampIntoView(el.settings);   // content height changed: keep the footer reachable
+  }
+
+  function collectValues() {
+    const out = {};
+    settingsState.inputs.forEach((input, key) => {
+      const field = settingsState.fields[key];
+      if (!field) return;
+      if (field.control === "checkbox") out[key] = input.checked;
+      else if (field.control === "number") {
+        const text = String(input.value).trim();
+        // An empty or non-numeric box is passed through as-is; the bridge's
+        // validator rejects it with a field name, which beats guessing here.
+        out[key] = text === "" ? text : Number(text);
+      } else out[key] = input.value;
+    });
+    return out;
+  }
+
+  function positionSettings() {
+    // Open where the user dragged the widget, not in the factory corner.
+    if (el.panel.style.left) {
+      el.settings.style.left = el.panel.style.left;
+      el.settings.style.top = el.panel.style.top;
+      el.settings.style.right = "auto";
+      el.settings.style.bottom = "auto";
+    }
+  }
+
+  function clampIntoView(panel) {
+    // The drag anchor was clamped for the small widget, but the settings
+    // panel is much taller: opened low on screen its footer (Save / Cancel /
+    // Restart) lands under the viewport edge, and a clipped position:fixed
+    // panel cannot be scrolled into reach. Pull it back fully on screen.
+    if (panel.hidden) return;
+    const margin = 8;
+    const rect = panel.getBoundingClientRect();
+    if (!rect.height) return;
+    let top = rect.top;
+    let left = rect.left;
+    let moved = false;
+    if (rect.bottom > window.innerHeight - margin) {
+      top -= rect.bottom - (window.innerHeight - margin);
+      moved = true;
+    }
+    if (top < margin) { top = margin; moved = true; }
+    if (rect.right > window.innerWidth - margin) {
+      left -= rect.right - (window.innerWidth - margin);
+      moved = true;
+    }
+    if (left < margin) { left = margin; moved = true; }
+    if (moved) {
+      panel.style.top = `${Math.round(top)}px`;
+      panel.style.left = `${Math.round(left)}px`;
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+    }
+  }
+
+  function openSettings() {
+    settingsState.open = true;
+    positionSettings();
+    el.settings.hidden = false;
+    el.panel.style.display = "none";
+    renderFields();
+    if (!settingsState.schema) setSMsg("loading settings from the bridge\u2026");
+    syncSettings().then((reply) => {
+      if (!settingsState.open) return;
+      if (reply.ok) {
+        renderFields();
+        setSMsg("");
+        return;
+      }
+      renderFields();
+      setSMsg(settingsState.schema
+        ? "bridge unreachable \u2014 showing the last known values; saving needs the bridge"
+        : (reply.error || "bridge unreachable \u2014 settings unavailable"), "err");
+    });
+  }
+
+  function closeSettings() {
+    settingsState.open = false;
+    el.settings.hidden = true;
+    el.panel.style.display = "";
+  }
+
+  async function saveSettings() {
+    if (settingsState.busy || !settingsState.schema) return;
+    settingsState.busy = true;
+    el.ssave.disabled = true;
+    el.scancel.disabled = true;
+    setSMsg("saving\u2026");
+    const reply = await ask({ type: "settingsSave", payload: collectValues() });
+    settingsState.busy = false;
+    el.scancel.disabled = false;
+    if (!reply.ok) {
+      el.ssave.disabled = false;
+      setSMsg(reply.error || "bridge rejected the settings", "err");
+      return;
+    }
+    el.ssave.disabled = false;
+    settingsState.values = reply.settings || settingsState.values;
+    cacheSettings(reply.settings);
+    applySettings(reply.settings);
+    let msg = "settings saved \u2014 applied, no restart";
+    const card = reply.card_config;
+    if (card && card.error) msg += `\nconfig.txt: ${card.error}`;
+    else if (card && card.warning) msg += `\n${card.warning}`;
+    else if (card && card.written) msg += "\nconfig.txt written to the card";
+    setSMsg(msg, card && (card.error || card.warning) ? "warn" : "ok");
+    if (!ui.busy) setStatus("settings saved", "");
+  }
+
+  // The stale-bridge escape hatch: the service exits non-zero and systemd's
+  // Restart=on-failure brings it back running whatever is on disk now. The
+  // panel then re-syncs, which both proves the restart and shows the new
+  // build's version — unsaved edits are dropped in favour of fresh values.
+  async function restartBridge() {
+    if (settingsState.busy) return;
+    settingsState.busy = true;
+    el.srestart.disabled = true;
+    el.ssave.disabled = true;
+    setSMsg("restarting the bridge service\u2026");
+    const reply = await ask({ type: "restart" });
+    if (!reply.ok) {
+      settingsState.busy = false;
+      el.srestart.disabled = false;
+      el.ssave.disabled = !(settingsState.schema && settingsState.values);
+      setSMsg(reply.error || "restart failed", "err");
+      return;
+    }
+    // The unit is down for RestartSec (2s) plus boot; probe until it answers.
+    const deadline = Date.now() + 15000;
+    let back = null;
+    while (Date.now() < deadline) {
+      await sleep(700);
+      const probe = await ask({ type: "health" });
+      if (probe.ok) { back = probe; break; }
+    }
+    if (!alive()) return;
+    settingsState.busy = false;
+    el.srestart.disabled = false;
+    if (!back) {
+      el.ssave.disabled = !(settingsState.schema && settingsState.values);
+      setSMsg("bridge did not come back within 15s \u2014 check: "
+        + "systemctl --user status spottytube-bridge", "err");
+      return;
+    }
+    await syncSettings();   // re-pull schema + values from the new build
+    if (!alive() || !settingsState.open) return;
+    renderFields();
+    setSMsg(`bridge restarted \u2014 now v${back.version}`, "ok");
+  }
+
+  el.gear.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (settingsState.open) closeSettings();
+    else openSettings();
+  });
+  el.sclose.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeSettings();
+  });
+  el.ssave.addEventListener("click", (event) => {
+    event.stopPropagation();
+    saveSettings();
+  });
+  el.scancel.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeSettings();   // discard: nothing is applied until Save succeeds
+  });
+  el.srestart.addEventListener("click", (event) => {
+    event.stopPropagation();
+    restartBridge();
   });
 
   // --- speed --------------------------------------------------------------
@@ -556,7 +946,6 @@
         url: pageUrl(),
         start: fmt(s.start),
         end: fmt(s.end),
-        mode: ui.mode,
         speed: rate.state().speed
       }
     });
@@ -586,7 +975,7 @@
       // context invalidated" inside a page that outlived the extension, and a
       // rejection nobody handles surfaces as an uncaught error in the console.
       chrome.storage.local.set({ spottytube: {
-        mode: ui.mode, collapsed: ui.collapsed, left: ui.left, top: ui.top,
+        collapsed: ui.collapsed, left: ui.left, top: ui.top,
         speed: sp.speed, snap: sp.snap, player: sp.player
       } }, () => { void chrome.runtime.lastError; });
     } catch { /* ignore */ }
@@ -630,7 +1019,7 @@
 
   let drag = null;
   el.bar.addEventListener("pointerdown", (event) => {
-    if (event.target === el.fold) return;
+    if (event.target === el.fold || event.target === el.gear) return;
     const box = el.panel.getBoundingClientRect();
     drag = { dx: event.clientX - box.left, dy: event.clientY - box.top };
     el.bar.classList.add("dragging");
@@ -713,17 +1102,23 @@
     el.ver.remove();
   }
 
-  // Restore saved UI state, then check the bridge once.
+  // Restore saved UI state and cached settings, then check the bridge once.
   try {
-    chrome.storage.local.get("spottytube", (saved) => {
+    chrome.storage.local.get(["spottytube", "spottytubeSettings"], (saved) => {
       const s = saved && saved.spottytube;
       if (s) {
-        ui.mode = s.mode === "append" ? "append" : "bump";
         ui.collapsed = Boolean(s.collapsed);
         rate.restore(s);
         if (typeof s.left === "number" && typeof s.top === "number") place(s.left, s.top);
       }
+      const cached = saved && saved.spottytubeSettings;
+      if (cached) applySettings(cached);
+      if (!s || s.speed == null) {
+        // No remembered speed: open on the configured slider default.
+        rate.set(window.SpottySpeed.uiEnvelope().defaultSpeed);
+      }
       render();
+      syncSettings();   // silently pick up changes made elsewhere
     });
   } catch {
     render();
