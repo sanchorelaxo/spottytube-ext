@@ -28,12 +28,19 @@
     return FLASH_MS;
   }
 
-  // The cap is on the range you pick and it does not move with the speed. A
-  // slowed range can still overflow the 42 s the deck stores, but that check
-  // belongs to whoever knows the speed, not here.
+  // The cap is on what the deck stores, not on the range you pick: stored
+  // seconds are the picked range divided by the speed it was heard at. 63s of
+  // source at 1.5x is a 42s sample and fits. Each click carries the heard
+  // speed; without one, 1x is assumed, so speed-blind callers get the old
+  // behaviour and a junk rate can never divide the range by garbage.
+  function heardRate(speed) {
+    return typeof speed === "number" && isFinite(speed) && speed > 0 ? speed : 1;
+  }
+
   function createPair() {
     var start = null;
     var end = null;
+    var rate = 1;
 
     function snapshot() {
       return {
@@ -41,16 +48,19 @@
         end: end,
         duration: start !== null && end !== null ? end - start : null,
         complete: start !== null && end !== null,
-        overLimit: start !== null && end !== null && end - start > MAX_LOOP
+        overLimit: start !== null && end !== null &&
+          (end - start) / rate > MAX_LOOP + 1e-9
       };
     }
 
     return {
-      // seconds = current playback position. Returns {action, ...state}.
-      click: function (seconds) {
+      // seconds = current playback position, speed = the rate it was heard
+      // at. Returns {action, ...state}.
+      click: function (seconds, speed) {
         if (typeof seconds !== "number" || !isFinite(seconds) || seconds < 0) {
           return Object.assign({ action: "rejected", reason: "no playback position" }, snapshot());
         }
+        rate = heardRate(speed);
         var at = Math.floor(seconds);
 
         if (start === null) {

@@ -271,6 +271,19 @@ class TestSample(ServerCase):
         self.assertIn("42", body["error"])
         self.assertFalse(self.args_file.exists())
 
+    def test_a_fast_range_over_42_source_seconds_is_accepted(self):
+        # 42s heard at 1.5x moves the source 63s; the deck stores 42s.
+        payload = dict(self.payload, start="1:00", end="2:03", speed=1.5)
+        status, body, _ = self.request("/sample", "POST", payload)
+        self.assertEqual(status, 202, body)
+
+    def test_the_same_range_at_normal_speed_is_rejected(self):
+        payload = dict(self.payload, start="1:00", end="2:03")
+        status, body, _ = self.request("/sample", "POST", payload)
+        self.assertEqual(status, 400)
+        self.assertIn("42s max", body["error"])
+        self.assertFalse(self.args_file.exists())
+
 
 class TestCors(ServerCase):
     def test_extension_origin_is_echoed(self):

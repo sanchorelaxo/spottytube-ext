@@ -588,6 +588,31 @@ class TestSpeedCut(CardFixture):
         result = self.build(40, "0:00", "0:21", speed=0.5)
         self.assertAlmostEqual(wav_seconds(result.segment_path), 42.0, delta=0.1)
 
+    def test_a_range_over_42_source_seconds_fits_when_heard_faster(self):
+        # 42s of wall time heard at 1.5x moves the source 63s. The cut takes
+        # all 63s at normal speed; the retime pass squeezes it back to the
+        # 42s the deck stores.
+        result = self.build(63, "0:00", "1:03", speed=1.5)
+        self.assertAlmostEqual(wav_seconds(result.segment_path), 42.0, delta=0.15)
+
+    def test_the_intermediate_cut_is_capped_at_the_fastest_playable_range(self):
+        # 84s is 42s at the player's 2x maximum; past that no speed can
+        # bring the range back onto the deck.
+        source = self.root / "envelope.wav"
+        source.write_bytes(wav(1, seconds=1.0))
+        cut = self.root / "cut.wav"
+        with self.assertRaises(ValueError) as caught:
+            sample_tool.extract_segment(source, cut, 0, 85)
+        self.assertIn("84", str(caught.exception))
+
+    def test_retime_refuses_an_overlong_segment_even_at_1x(self):
+        source = self.root / "long.wav"
+        source.write_bytes(wav(1, seconds=43))
+        out = self.root / "out.wav"
+        with self.assertRaises(ValueError) as caught:
+            sample_tool.retime_segment(source, out, 1.0)
+        self.assertIn("42", str(caught.exception))
+
     def test_as_dict_carries_the_speed(self):
         result = self.build(4, "0:00", "0:02", speed=1.5)
         self.assertEqual(result.as_dict()["speed"], 1.5)

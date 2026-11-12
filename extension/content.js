@@ -325,14 +325,20 @@
     el.countdown.querySelector("output").textContent = `${st.remaining}s`;
   }
 
+  // "63s at 1.50x → 42s" when the speed moves the stored length; "63s" at 1x.
+  function deckLabel(duration, sp, stored) {
+    if (sp.speed === 1 || stored === null) return `${duration}s`;
+    return `${duration}s at ${sp.label} \u2192 ${Math.round(stored * 10) / 10}s`;
+  }
+
   function render() {
     const sp = rate.state();
     const s = pair.state();
-    // What the deck will actually hold: a slowed-down range is longer than the
-    // range you picked, and the 42 s ceiling applies to what gets stored.
+    // The 42 s ceiling is on what the deck stores: the picked range divided
+    // by the speed it was heard at. A 63 s range at 1.5x is a 42 s sample and
+    // fits, so the raw-range verdict must not veto it here.
     const stored = window.SpottySpeed.outputSeconds(s.duration, sp.speed);
-    const overDeck = Boolean(s.overLimit) ||
-      (stored !== null && stored > MAX_LOOP + 1e-9);
+    const overDeck = stored !== null && stored > MAX_LOOP + 1e-9;
 
     el.start.classList.toggle("empty", s.start === null);
     el.start.querySelector("output").textContent = s.start === null ? "\u2013\u2013" : fmt(s.start);
@@ -438,15 +444,17 @@
       setStatus(`${MAX_LOOP}s elapsed \u2014 no player position, out-point not set`, "err");
       return;
     }
-    const result = pair.click(at);
+    const result = pair.click(at, rate.state().speed);
     syncCountdown(result.action);
     render();
+    const sp = rate.state();
+    const stored = window.SpottySpeed.outputSeconds(result.duration, sp.speed);
     if (result.action === "end") {
       setStatus(`${MAX_LOOP}s elapsed \u2014 out-point set automatically: ` +
-                `${fmt(result.start)} \u2192 ${fmt(result.end)} (${result.duration}s) \u2014 ready`, "");
+                `${fmt(result.start)} \u2192 ${fmt(result.end)} (${deckLabel(result.duration, sp, stored)}) \u2014 ready`, "");
     } else if (result.action === "end-too-long") {
-      setStatus(`${MAX_LOOP}s elapsed \u2014 the auto out-point makes ${result.duration}s, ` +
-                `over the ${MAX_LOOP}s maximum. Click to start a new pair, hold to clear.`, "err");
+      setStatus(`${MAX_LOOP}s elapsed \u2014 the auto out-point makes ${deckLabel(result.duration, sp, stored)}, ` +
+                `over the ${MAX_LOOP}s deck maximum. Click to start a new pair, hold to clear.`, "err");
     } else if (result.action === "start-moved") {
       setStatus(`${MAX_LOOP}s elapsed \u2014 the player never moved past the in-point; ` +
                 "counting down again", "");
@@ -462,21 +470,21 @@
       setStatus("no player found on this page", "err");
       return;
     }
-    const result = pair.click(at);
+    const result = pair.click(at, rate.state().speed);
     syncCountdown(result.action);
     render();
 
+    const sp = rate.state();
+    const stored = window.SpottySpeed.outputSeconds(result.duration, sp.speed);
     if (result.action === "rejected") {
       setStatus(result.reason, "err");
     } else if (result.action === "end-too-long") {
-      setStatus(`${result.duration}s is over the ${MAX_LOOP}s maximum slice. ` +
+      setStatus(`${deckLabel(result.duration, sp, stored)} is over the ${MAX_LOOP}s deck maximum. ` +
                 "Click to start a new pair, hold to clear.", "err");
     } else if (result.action === "start-moved") {
       setStatus(`in-point moved to ${fmt(result.start)} (was after the out-point)`, "");
     } else if (result.action === "end") {
-      const sp = rate.state();
-      const at = sp.speed === 1 ? "" : ` at ${sp.label}`;
-      setStatus(`${fmt(result.start)} \u2192 ${fmt(result.end)} (${result.duration}s${at}) — ready`, "");
+      setStatus(`${fmt(result.start)} \u2192 ${fmt(result.end)} (${deckLabel(result.duration, sp, stored)}) — ready`, "");
     } else if (result.action === "restart") {
       setStatus(`new pair from ${fmt(result.start)}`, "");
     } else {
@@ -934,7 +942,11 @@
     event.stopPropagation();
     if (ui.busy) return;
     const s = pair.state();
-    if (!s.complete || s.overLimit) return;
+    const sp = rate.state();
+    // Re-check the stored length live: the slider may have moved since the
+    // out-point was picked, and the deck limit is on stored seconds.
+    const stored = window.SpottySpeed.outputSeconds(s.duration, sp.speed);
+    if (!s.complete || (stored !== null && stored > MAX_LOOP + 1e-9)) return;
 
     ui.busy = true;
     render();

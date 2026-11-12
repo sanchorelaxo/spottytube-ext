@@ -80,12 +80,44 @@ test("exactly at the limit is allowed", () => {
   assert.equal(r.overLimit, false);
 });
 
-test("the cap does not move with the speed: 60s is too long at any rate", () => {
-  const pair = createPair();
-  pair.click(0);
-  const r = pair.click(60);          // would fit at 2x, still refused
-  assert.equal(r.action, "end-too-long");
-  assert.equal(r.overLimit, true);
+test("the cap is on stored seconds: the range divided by the heard speed", () => {
+  // 63s of source heard at 1.5x is a 42s sample: the deck fits it.
+  const fast = createPair();
+  fast.click(0);
+  const r = fast.click(63, 1.5);
+  assert.equal(r.action, "end");
+  assert.equal(r.overLimit, false);
+  assert.equal(r.duration, 63);
+
+  // The same range at 1x is 63s on the deck: too long.
+  const plain = createPair();
+  plain.click(0);
+  assert.equal(plain.click(63).action, "end-too-long");
+
+  // 85s fits at no speed the player offers (fastest is 2x -> 42.5s).
+  const huge = createPair();
+  huge.click(0);
+  assert.equal(huge.click(85, 2).action, "end-too-long");
+});
+
+test("a junk speed falls back to 1x rather than dividing by garbage", () => {
+  for (const bad of [0, -1, NaN, Infinity, "1.5", null, undefined]) {
+    const pair = createPair();
+    pair.click(0);
+    assert.equal(pair.click(60, bad).action, "end-too-long", `speed ${bad}`);
+  }
+});
+
+test("state() judges the limit at the speed the clicks were heard at", () => {
+  const fast = createPair();
+  fast.click(0, 1.5);
+  fast.click(63, 1.5);
+  assert.equal(fast.state().overLimit, false);
+
+  const strict = createPair();
+  strict.click(0, 1);
+  strict.click(63, 1);
+  assert.equal(strict.state().overLimit, true);
 });
 
 test("reset clears both indexes", () => {

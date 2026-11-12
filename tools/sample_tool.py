@@ -29,7 +29,9 @@ Ordering:
     it always lands in the next directory in order. Nothing is ever deleted.
     Append mode takes the first free slot instead and never moves anything.
 
-Deck maximum loop is 42 s, so longer segments are refused rather than silently
+Deck maximum loop is 42 s of STORED audio: the picked range divided by the
+speed it was heard at. A 63 s range at 1.5x is a 42 s sample and is accepted;
+anything that would play longer on the deck is refused rather than silently
 truncated.
 
 Sources:
@@ -71,10 +73,15 @@ import wav_builder as wb  # noqa: E402
 # Deck ceiling from the manual: 42 s max loop per deck.
 MAX_LOOP_SECONDS = 42.0
 
-# Playback rates a player offers. Below 1x the stored sample is longer than the
-# range you picked, so the deck ceiling can be hit from the slow side too.
+# Playback rates a player offers. The deck ceiling applies to what gets
+# stored: the picked range divided by the speed it was heard at.
 MIN_SPEED = 0.25
 MAX_SPEED = 2.0
+
+# The cut is an intermediate, never the file the deck plays: the longest
+# source range any speed can still bring back onto the deck is 42 s at the
+# player's 2x maximum. The real limit is on the retimed output.
+RAW_CUT_CEILING = MAX_LOOP_SECONDS * MAX_SPEED
 
 # wav_builder writes a bare 44-byte canonical WAV header, no fact/ext chunks.
 PLAIN_WAV_HEADER = 44
@@ -583,20 +590,23 @@ def wav_seconds(path):
 def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0):
     """Cut ``[start, start+seconds)`` and write a native Spotykach WAV.
 
-    No speed is applied here: this is the plain slice, capped at the deck's
-    loop length. :func:`retime_segment` is the pass that re-times it.
+    No speed is applied here: this is the plain slice, an intermediate. The
+    deck ceiling applies to the retimed output; :func:`retime_segment` is the
+    pass that re-times it and enforces the 42 s stored limit at every speed.
 
     ``loudnorm`` runs ffmpeg's EBU R128 filter over the cut so every sample
     lands at the same perceived loudness; ``loudnorm_i`` is the target in
     LUFS (TP -1.5, LRA 11 are the customary companions).
 
-    Enforces the deck's loop ceiling here as well as in :func:`build_sample`, so
-    a direct library call cannot produce a file the hardware would silently cut.
+    Enforces the absolute envelope here as well: :data:`RAW_CUT_CEILING` is
+    the longest range any player speed can still fit on the deck (42 s at the
+    2x maximum), so a direct library call cannot cut a range no speed saves.
     """
     src, dst = Path(src), Path(dst)
-    if seconds > MAX_LOOP_SECONDS + 1e-9:
+    if seconds > RAW_CUT_CEILING + 1e-9:
         raise ValueError(
-            f"segment is {seconds:g}s; a deck holds {MAX_LOOP_SECONDS:g}s max"
+            f"segment is {seconds:g}s; {RAW_CUT_CEILING:g}s is the longest "
+            f"range any speed fits on a {MAX_LOOP_SECONDS:g}s deck"
         )
     dst.parent.mkdir(parents=True, exist_ok=True)
     rough = dst.with_name(dst.stem + ".cut.wav")
@@ -677,11 +687,8 @@ def retime_segment(src, dst, speed, method="atempo"):
         )
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    if abs(speed - 1.0) < 1e-9:
-        if src.resolve() != dst.resolve():
-            shutil.copyfile(src, dst)
-        return dst
-
+    # The deck limit applies at every speed, 1x included: this is the last
+    # gate before the file the deck will actually play.
     seconds = wav_seconds(src)
     plays = seconds / speed
     if plays > MAX_LOOP_SECONDS + 1e-9:
@@ -689,6 +696,11 @@ def retime_segment(src, dst, speed, method="atempo"):
             f"{seconds:g}s at {speed:g}x plays for {plays:.2f}s; a deck holds "
             f"{MAX_LOOP_SECONDS:g}s max — shorten the range or raise the speed"
         )
+
+    if abs(speed - 1.0) < 1e-9:
+        if src.resolve() != dst.resolve():
+            shutil.copyfile(src, dst)
+        return dst
 
     if method == "varispeed":
         af = f"asetrate={wb.SAMPLE_RATE * speed:g},aresample={wb.SAMPLE_RATE}"
@@ -859,10 +871,8 @@ def build_sample(url, start, end, card=None, cache_dir=None,
         raise ValueError(f"end ({end_s:g}s) must be after start ({start_s:g}s)")
     duration = end_s - start_s
     speed = validate_speed(speed)
-    if duration > MAX_LOOP_SECONDS:
-        raise ValueError(
-            f"segment is {duration:g}s; a deck holds {MAX_LOOP_SECONDS:g}s max"
-        )
+    # The deck limit is on what gets STORED: the range divided by the speed
+    # it was heard at. 63s of source at 1.5x is a 42s sample and fits.
     plays = duration / speed
     if plays > MAX_LOOP_SECONDS + 1e-9:
         raise ValueError(

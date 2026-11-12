@@ -123,11 +123,13 @@ pipeline needs no change).
   and snap persist.
 
 Times are whole seconds; `sample_tool` parses `SS`, `MM:SS` or `HH:MM:SS`.
-The 42 s ceiling is fixed: it caps the range you pick, and it caps what the
-deck stores, so slowing a range down does not buy you a longer selection — at
-0.5x only 21 s of source fits in 42 s of tape, and at 2x a 42 s pick simply
-becomes a 21 s sample. The widget, the bridge and the tool all refuse a range
-whose stored length is over 42 s.
+The 42 s ceiling applies to what gets STORED, not to the range you pick:
+stored seconds are the range divided by the speed you heard it at. Slowing
+down does not buy a longer selection — at 0.5x only 21 s of source fits in
+42 s of tape. Speeding up lets a longer source range fit the same tape — at
+1.5x, 63 s of source becomes a 42 s sample: the cut is taken at normal speed
+and re-timed at 1.5x when it is built. The widget, the bridge and the tool all
+refuse a range whose stored length is over 42 s.
 
 ## Slot order
 

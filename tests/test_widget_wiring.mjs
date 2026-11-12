@@ -43,13 +43,24 @@ test("the player's rate is read and followed", () => {
   assert.match(content, /setInterval\(\(\) => \{ if \(alive\(\)\) watchRate\(\)/);
 });
 
-test("the 42s cap stays on the picked range, whatever the speed", () => {
+test("the 42s cap is on stored seconds, and every click carries the speed", () => {
   assert.doesNotMatch(content, /setLimit/);
   assert.match(content, /window\.SpottySpeed\.outputSeconds\(s\.duration, sp\.speed\)/);
+  // The raw-range verdict must not veto a fast selection: 63s of source
+  // heard at 1.5x is a 42s sample, and the deck limit judges stored seconds.
+  assert.doesNotMatch(content, /Boolean\(s\.overLimit\)/);
+  assert.match(content, /stored > MAX_LOOP \+ 1e-9/);
+  // Both clicks into the pair (manual tap and auto-end) pass the heard
+  // speed, so the state machine judges the same seconds the deck will.
+  assert.equal((content.match(/pair\.click\(at, rate\.state\(\)\.speed\)/g) || []).length, 2);
+  assert.doesNotMatch(content, /pair\.click\(at\)/);
+  // The send gate re-checks the stored length, not the raw-range flag.
+  assert.doesNotMatch(content, /!s\.complete \|\| s\.overLimit/);
 });
 
-test("a slowed range that would overrun the deck is flagged", () => {
+test("a range that would overrun the deck once stored is flagged", () => {
   assert.match(content, /stored > MAX_LOOP/);
+  assert.match(content, /overDeck/);
 });
 
 test("the bar names the version that is running", () => {
@@ -124,7 +135,7 @@ test("elapse with no out-point auto-clicks the player position as the end", () =
   assert.match(content, /function autoEnd\(/);
   assert.match(content, /st\.expired/);
   const fn = content.slice(content.indexOf("function autoEnd"), content.indexOf("function", content.indexOf("function autoEnd") + 10));
-  assert.match(fn, /pair\.click\(at\)/);        // same state machine as a manual SET END
+  assert.match(fn, /pair\.click\(at, rate\.state\(\)\.speed\)/); // same state machine as a manual SET END, at the heard speed
   assert.match(fn, /position\(\)/);             // the player's position at the elapse
   assert.match(fn, /syncCountdown\(result\.action\)/);
 });

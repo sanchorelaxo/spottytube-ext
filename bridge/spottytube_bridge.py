@@ -282,9 +282,8 @@ def _validate(body):
         return None, str(error)
     if end_s <= start_s:
         return None, f"end ({end_s:g}s) must be after start ({start_s:g}s)"
-    if end_s - start_s > MAX_LOOP_SECONDS:
-        return None, (f"segment is {end_s - start_s:g}s; a deck holds "
-                      f"{MAX_LOOP_SECONDS:g}s max")
+    # The deck limit is on what gets stored: the range divided by the speed it
+    # was heard at. 63 s of source at 1.5x is a 42 s sample and is accepted.
     plays = (end_s - start_s) / speed
     if plays > MAX_LOOP_SECONDS:
         return None, (f"{end_s - start_s:g}s at {speed:g}x plays for "
