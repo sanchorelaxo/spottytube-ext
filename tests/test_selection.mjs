@@ -17,7 +17,7 @@ function load() {
   return sandbox.window.SpottySelection;
 }
 
-const { createPair, createCountdown, MAX_LOOP, DANGER_SECONDS, FLASH_MS } = load();
+const { createPair, createCountdown, clampOutPoint, MAX_LOOP, DANGER_SECONDS, FLASH_MS } = load();
 
 test("starts empty", () => {
   const s = JSON.parse(JSON.stringify(createPair().state()));
@@ -118,6 +118,28 @@ test("state() judges the limit at the speed the clicks were heard at", () => {
   strict.click(0, 1);
   strict.click(63, 1);
   assert.equal(strict.state().overLimit, true);
+});
+
+test("clampOutPoint trims an auto end to what the deck stores at the heard speed", () => {
+  // The wall-clock elapse at 0.75x can sit 32s past the in-point, which the
+  // deck would store as 42.7s. Clamped to a 31s range -> 41.3s stored: fits.
+  assert.equal(clampOutPoint(100, 132, 0.75), 131);
+  const pair = createPair();
+  pair.click(100, 0.75);
+  const r = pair.click(clampOutPoint(100, 132, 0.75), 0.75);
+  assert.equal(r.action, "end");
+  assert.equal(r.overLimit, false);
+
+  // Faster speeds allow a proportionally longer source range: 42s stored
+  // at 1.5x is 63s of source.
+  assert.equal(clampOutPoint(0, 90, 1.5), 63);
+
+  // Inside the cap: never extend, never shorten.
+  assert.equal(clampOutPoint(10, 20, 1), 20);
+  assert.equal(clampOutPoint(10, 5, 1), 5);
+
+  // A junk speed falls back to 1x rather than clamping by garbage.
+  assert.equal(clampOutPoint(0, 50, NaN), 42);
 });
 
 test("reset clears both indexes", () => {

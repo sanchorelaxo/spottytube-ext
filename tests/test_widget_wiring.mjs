@@ -52,7 +52,9 @@ test("the 42s cap is on stored seconds, and every click carries the speed", () =
   assert.match(content, /stored > MAX_LOOP \+ 1e-9/);
   // Both clicks into the pair (manual tap and auto-end) pass the heard
   // speed, so the state machine judges the same seconds the deck will.
-  assert.equal((content.match(/pair\.click\(at, rate\.state\(\)\.speed\)/g) || []).length, 2);
+  // The auto-end click goes through clampOutPoint first, then sp.speed.
+  assert.equal((content.match(/pair\.click\(at, rate\.state\(\)\.speed\)/g) || []).length, 1);
+  assert.equal((content.match(/pair\.click\(at, sp\.speed\)/g) || []).length, 1);
   assert.doesNotMatch(content, /pair\.click\(at\)/);
   // The send gate re-checks the stored length, not the raw-range flag.
   assert.doesNotMatch(content, /!s\.complete \|\| s\.overLimit/);
@@ -135,8 +137,8 @@ test("elapse with no out-point auto-clicks the player position as the end", () =
   assert.match(content, /function autoEnd\(/);
   assert.match(content, /st\.expired/);
   const fn = content.slice(content.indexOf("function autoEnd"), content.indexOf("function", content.indexOf("function autoEnd") + 10));
-  assert.match(fn, /pair\.click\(at, rate\.state\(\)\.speed\)/); // same state machine as a manual SET END, at the heard speed
-  assert.match(fn, /position\(\)/);             // the player's position at the elapse
+  assert.match(fn, /pair\.click\(at, sp\.speed\)/); // same state machine as a manual SET END, at the heard speed
+  assert.match(fn, /clampOutPoint\(pair\.state\(\)\.start, raw, sp\.speed\)/); // trimmed so the stored length can never edge past the deck cap
   assert.match(fn, /syncCountdown\(result\.action\)/);
 });
 

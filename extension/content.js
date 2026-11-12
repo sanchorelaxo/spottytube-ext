@@ -433,25 +433,31 @@
 
   // Zero reached with no out-point clicked: the player's position at the
   // elapse becomes the out-point, through the same state machine a manual
-  // SET END press goes through, so over-limit and paused-player cases behave
-  // exactly as they do by hand.
+  // SET END press goes through. One difference: the countdown is wall-clock
+  // while the deck cap is on stored seconds, so at speeds below 1x the
+  // position can edge a hair past the cap (32s at 0.75x stores as 42.7s).
+  // The clamp trims the source end so the stored length always fits.
   function autoEnd() {
     if (pair.state().complete) { countdown.disarm(); render(); return; }
-    const at = position();
-    if (at === null) {
+    const raw = position();
+    if (raw === null) {
       countdown.disarm();
       render();
       setStatus(`${MAX_LOOP}s elapsed \u2014 no player position, out-point not set`, "err");
       return;
     }
-    const result = pair.click(at, rate.state().speed);
+    const sp = rate.state();
+    const at = window.SpottySelection.clampOutPoint(pair.state().start, raw, sp.speed);
+    const result = pair.click(at, sp.speed);
     syncCountdown(result.action);
     render();
-    const sp = rate.state();
     const stored = window.SpottySpeed.outputSeconds(result.duration, sp.speed);
     if (result.action === "end") {
+      const trimmed = at < raw
+        ? ` \u2014 end trimmed from ${fmt(Math.floor(raw))} to fit the ${MAX_LOOP}s deck cap`
+        : "";
       setStatus(`${MAX_LOOP}s elapsed \u2014 out-point set automatically: ` +
-                `${fmt(result.start)} \u2192 ${fmt(result.end)} (${deckLabel(result.duration, sp, stored)}) \u2014 ready`, "");
+                `${fmt(result.start)} \u2192 ${fmt(result.end)} (${deckLabel(result.duration, sp, stored)})${trimmed} \u2014 ready`, "");
     } else if (result.action === "end-too-long") {
       setStatus(`${MAX_LOOP}s elapsed \u2014 the auto out-point makes ${deckLabel(result.duration, sp, stored)}, ` +
                 `over the ${MAX_LOOP}s deck maximum. Click to start a new pair, hold to clear.`, "err");

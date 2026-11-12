@@ -92,8 +92,13 @@ pipeline needs no change).
 - Once the in-point is picked, an **AUTO-END IN** countdown runs 42 s of wall
   time; the last 5 s flash red every half second. If it reaches zero with no
   out-point clicked, the player's position at the elapse becomes the out-point
-  automatically, exactly as if SET END had been pressed then. Picking an
-  out-point, holding to reset, or moving to another video stops the count.
+  automatically. Because the count is wall time while the deck cap is on
+  stored seconds, a slow rate can leave the position a hair over the cap
+  (32 s of source at 0.75x stores as 42.7 s); the auto out-point is then
+  trimmed to the longest whole-second range that fits, and the status says
+  so. A manual SET END is never trimmed: over the cap it is flagged instead.
+  Picking an out-point, holding to reset, or moving to another video stops
+  the count.
 - **Bump / Append** picks where on the tape chain the sample lands (see Slot
   order below). The deck choice is gone: files live in the `B G P R T Y`
   directories, not on a deck. `--tape` picks the tape the chain starts at.

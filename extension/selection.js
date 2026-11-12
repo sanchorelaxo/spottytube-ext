@@ -37,6 +37,19 @@
     return typeof speed === "number" && isFinite(speed) && speed > 0 ? speed : 1;
   }
 
+  // The countdown is wall-clock, but the deck cap is on stored seconds: at
+  // speeds below 1x the player covers less source than the wall seconds that
+  // elapsed, yet stored = range / speed can still edge past MAX_LOOP (32s at
+  // 0.75x stores as 42.7s). The auto out-point trims the candidate end to the
+  // longest whole-second range whose stored length fits; manual ends keep the
+  // end-too-long verdict. Never extends an end that already fits.
+  function clampOutPoint(start, seconds, speed) {
+    var rate = heardRate(speed);
+    var from = typeof start === "number" && isFinite(start) ? start : 0;
+    var maxRange = Math.floor(MAX_LOOP * rate);
+    return Math.min(seconds, from + maxRange);
+  }
+
   function createPair() {
     var start = null;
     var end = null;
@@ -137,6 +150,7 @@
   var api = {
     createPair: createPair,
     createCountdown: createCountdown,
+    clampOutPoint: clampOutPoint,
     setDangerSeconds: setDangerSeconds,
     setFlashMs: setFlashMs,
     MAX_LOOP: MAX_LOOP,
