@@ -2,8 +2,9 @@
 
 Date: 2026-11-24
 Status: awaiting approval
-Topic: 9 new ffmpeg/edge-processing settings, surfaced in a collapsed "Advanced"
-group at the end of the Audio pipeline section of the settings window.
+Topic: 8 new ffmpeg/edge-processing settings (a ninth, mono output, was dropped),
+surfaced in a collapsed "Advanced" group at the end of the Audio pipeline section
+of the settings window.
 
 ## Goal
 
@@ -19,11 +20,11 @@ LUFS target. Everything else is hardcoded and invisible:
 
 Consequences the user named: a hard slice of a loud waveform clicks and that
 click is baked into every trigger; the retime pass can push peaks past full
-scale; headroom is eaten by sub-bass and DC; samplers that want mono pay for
-stereo.
+scale; headroom is eaten by sub-bass and DC.
 
-The change: add 9 topics of control, applied for real in the ffmpeg chain,
+The change: add 8 topics of control, applied for real in the ffmpeg chain,
 grouped in a new collapsible "Advanced" section that is collapsed by default.
+(The original ninth, mono/stereo output, is not offered -- see D6.)
 
 ## Non-goals
 
@@ -75,7 +76,7 @@ only (ephemeral — the group re-collapses on the next open, which is what
 
 ### The 9 topics
 
-Nine topics, ~19 schema fields (a topic with a value and a mode needs two
+Eight topics, ~18 schema fields (a topic with a value and a mode needs two
 controls). Defaults are chosen so that *every new setting at its default leaves
 existing output byte-identical*; see Decisions D1.
 
@@ -86,23 +87,22 @@ existing output byte-identical*; see Decisions D1.
 | 2 | True-peak limiter | `true_peak` | checkbox | off | — |
 |   |  | `true_peak_dbtp` | number | −1.0 | −6…0 dBTP |
 | 3 | Cut accuracy | `cut_seek` | select | `fast` | fast / accurate |
-| 4 | Output channels | `output_channels` | select | `stereo` | stereo / mono |
-| 5 | Loudnorm completion | `loudnorm_tp` | number | −1.5 | −6…0 dBTP |
+| 4 | Loudnorm completion | `loudnorm_tp` | number | −1.5 | −6…0 dBTP |
 |   |  | `loudnorm_lra` | number | 11 | 1–50 |
 |   |  | `loudnorm_mode` | select | `dynamic` | dynamic (single-pass) / linear (two-pass) |
-| 6 | Rumble + DC | `highpass` | checkbox | off | — |
+| 5 | Rumble + DC | `highpass` | checkbox | off | — |
 |   |  | `highpass_hz` | number | 30 | 0–200 Hz |
 |   |  | `dc_shift` | checkbox | off | — |
-| 7 | Resample + dither | `resampler` | select | `swr` | swr / soxr |
+| 6 | Resample + dither | `resampler` | select | `swr` | swr / soxr |
 |   |  | `dither` | select | `none` | none / triangular / triangular_hp |
-| 8 | Edge silence trim | `trim_silence` | checkbox | off | — |
+| 7 | Edge silence trim | `trim_silence` | checkbox | off | — |
 |   |  | `trim_threshold_db` | number | −50 | −90…−20 dB |
-| 9 | Noise reduction | `noise_reduction` | checkbox | off | — |
+| 8 | Noise reduction | `noise_reduction` | checkbox | off | — |
 |   |  | `nr_method` | select | `afftdn` | afftdn / arnndn |
 |   |  | `nr_model` | text | "" | path to an rnnoise model (arnndn only) |
 
-All fields carry `"scope": "tool"` except `output_channels`, which is also
-`"tool"` — everything here is read by `sample_tool.py` per build.
+All fields carry `"scope": "tool"` — everything here is read by `sample_tool.py`
+per build.
 
 ### Where each one lands in the chain
 
@@ -140,12 +140,9 @@ Final pass (new, runs only when needed):
     alimiter (true peak) and/or -ac <channels>
 
 `alimiter=limit=<linear>:level=off` with `linear = 10**(true_peak_dbtp/20)`,
-applied after retime so it protects the file that lands on the tape.
-`output_channels=mono` downmixes to one channel and duplicates it into both
-(L=R), not `-ac 1` -- see Hardware results: the firmware refuses a 1-channel
-file, so "mono" means dual mono inside a 2-channel WAV. The pass runs only if
-`true_peak` is on or mono was requested; otherwise the retime output is already
-final and nothing extra is spawned. Note `alimiter` is a sample-peak limiter;
+applied after retime so it protects the file that lands on the tape. The pass
+runs only if `true_peak` is on; otherwise the retime output is already final and
+nothing extra is spawned. Note `alimiter` is a sample-peak limiter;
 the −1.0 dBTP default leaves margin so it behaves as a true-peak guard in
 practice (documented in the setting's help text).
 
@@ -165,18 +162,17 @@ reads the slot back. The target slot was empty and was removed afterwards.
     readback:      byte-exact vs the stereo upload
 
 Conclusion: the firmware accepts a 2-channel 48 kHz float WAV and refuses the
-1-channel equivalent. Mono output ships as dual mono.
+1-channel equivalent. A mono setting could only be dual mono, which saves no
+space, so no such setting is offered.
 
 ## Failure modes and blast radius
 
-1. **Mono is not a 1-channel file.** Verified on hardware: firmware 1.4.0
-   rejects a 1-channel float WAV with status 12 ("device rejected the file
-   format") while the same code path accepts the 2-channel control. So
-   `output_channels=mono` cannot emit `-ac 1`; it downmixes to one channel and
-   duplicates into both, leaving a 2-channel WAV. That keeps the duration math
-   (`4 * wb.CHANNELS`, `sample_tool.py:586`, `:981`) and `wb.probe`'s channel
-   check (`wav_builder.py:154`) correct, so no `wav_seconds` change is needed.
-   The cost: card usage is not halved -- the file is still stereo-sized.
+1. **Mono output is not offered.** Verified on hardware: firmware 1.4.0 rejects
+   a 1-channel float WAV with status 12 ("device rejected the file format")
+   while the same code path accepts a 2-channel control. A "mono" setting could
+   only mean dual mono (downmix, duplicate), which does not halve card usage --
+   the whole point of the feature. Dropped at the user's direction; the tool
+   never emits a non-stereo file. See D6.
 2. **Trim vs the length guard.** `extract_segment` refuses a segment shorter
    than requested (`sample_tool.py:639`) as a "source shorter than range"
    error. `trim_silence` intentionally shortens the segment, so the guard must
@@ -206,15 +202,17 @@ Conclusion: the firmware accepts a 2-channel 48 kHz float WAV and refuses the
 - **D3 Chain order** as written above.
 - **D4 Passes are conditional.** No new ffmpeg process when nothing needs it.
 - **D5 Phased rollout**, one phase at a time (plan below).
+- **D6 No mono output** (dropped 2026-11-24). The firmware refuses 1-channel
+  files and dual mono saves no card space, so there is no setting for it.
 
 ## Resolved on hardware (2026-11-24)
 
-- **O1 -- mono: the firmware refuses it.** Tested against a connected Spotykach
-  (proto 1.2, firmware 1.4.0, tapes `BGPRTY`, 6 slots). A 1-channel 48 kHz
-  float WAV uploaded through the device's own protocol is rejected with status
-  12, "device rejected the file format"; the identical path accepts the
-  2-channel control file. `output_channels=mono` therefore means dual mono
-  (downmix, duplicate to L and R), not `-ac 1`.
+- **O1 -- mono: the firmware refuses it, so mono is dropped.** Tested against a
+  connected Spotykach (proto 1.2, firmware 1.4.0, tapes `BGPRTY`, 6 slots). A
+  1-channel 48 kHz float WAV uploaded through the device's own protocol is
+  rejected with status 12, "device rejected the file format"; the identical
+  path accepts the 2-channel control file. Dual mono would not halve card
+  usage, so no such setting is offered. See D6.
 - **O2 -- DC removal: measure-then-shift.** One `astats` probe pass reads the
   mean offset, then `dcshift=shift=-<dc>`. Chosen over a fixed low highpass.
 - **O3 -- edge fade defaults ON** (`declick`, 5 ms). See D1.
@@ -234,9 +232,7 @@ and README updates, each committed on its own.
   are tapered, silence is trimmed, the length guard tolerates the trim.
 - **Phase 3 — Loudnorm completion.** `loudnorm_tp`/`loudnorm_lra` replace the
   hardcodes; `loudnorm_mode=linear` adds the measured two-pass path.
-- **Phase 4 — Resample, dither, channels.** Wire `aresample` options;
-  implement `output_channels=mono` as downmix-plus-duplicate (2-channel
-  output; no `wav_seconds` change, no `-ac 1`).
+- **Phase 4 — Resample and dither.** Wire the `aresample` options.
 - **Phase 5 — Final limiter and noise reduction.** The post-retime `alimiter`
   pass and the `afftdn`/`arnndn` path, with the conditional-pass rule (D4).
 

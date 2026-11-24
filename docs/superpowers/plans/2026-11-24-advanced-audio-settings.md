@@ -4,7 +4,7 @@
 
 **Goal:** Add 9 topics of ffmpeg-oriented audio control to SpottyTube, surfaced in a collapsed "Advanced" group at the end of the ffmpeg section and applied for real in the pipeline.
 
-**Architecture:** Schema-first. The 19 new fields go in `tools/settings.py`, which already drives the panel, the bridge and the tool. The only new UI mechanism is a collapsible section, added as metadata beside `SECTIONS` so the `(key, label)` tuple shape stays intact. The ffmpeg filter expressions are built by a new pure module, `tools/audio_chain.py`, so chain order and flag syntax are unit-testable without invoking ffmpeg; `sample_tool.py` calls it and runs the passes.
+**Architecture:** Schema-first. The 18 new fields go in `tools/settings.py`, which already drives the panel, the bridge and the tool. The only new UI mechanism is a collapsible section, added as metadata beside `SECTIONS` so the `(key, label)` tuple shape stays intact. The ffmpeg filter expressions are built by a new pure module, `tools/audio_chain.py`, so chain order and flag syntax are unit-testable without invoking ffmpeg; `sample_tool.py` calls it and runs the passes.
 
 **Tech Stack:** Python 3.14 (stdlib only in `tools/`), ffmpeg 9 (resolved via `wb.ffmpeg()`), pytest, the existing `node --test` widget-wiring harness, Chrome MV3 panel in `extension/content.js`.
 
@@ -14,8 +14,8 @@
 
 - Python stdlib only under `tools/`. No new dependencies.
 - `SECTIONS` stays a tuple of `(key, label)` 2-tuples — `tests/test_settings.py:54` unpacks it that way. Collapse lives in a separate `SECTION_META`.
-- All 19 new fields carry `"section": "advanced"` and `"scope": "tool"`.
-- Output is always 48 kHz float, **2 channels**. Firmware 1.4.0 refuses a 1-channel WAV (status 12) — mono means dual mono, never `-ac 1`.
+- All 18 new fields carry `"section": "advanced"` and `"scope": "tool"`.
+- Output is always 48 kHz float, **2 channels**. Mono output is not offered (firmware 1.4.0 refuses 1-channel WAVs, and dual mono saves no card space).
 - `MAX_LOOP_SECONDS = 42.0`, `RAW_CUT_CEILING = 84.0`, `MIN_SPEED = 0.25`, `MAX_SPEED = 2.0` are unchanged.
 - A build with every new setting at its default must spawn **no extra ffmpeg pass** and produce output byte-identical to today, except `edge_fade` (default `declick`) which is the one intentional default-on behavior.
 - Commit per task; each task ends with its own tests green.
@@ -27,16 +27,15 @@ The spec's silence on these inputs is not permission for them to break:
 1. Silence trim shrinks the segment, and `extract_segment` already refuses a short segment as "source shorter than the requested range" (`sample_tool.py:639`) — trimming must not trip that guard.
 2. A segment shorter than twice the fade length: the fade-out `st` must clamp at 0, never negative.
 3. The default path must not accidentally grow a third ffmpeg pass or change output bytes.
-4. Mono must never produce a 1-channel file.
-5. `noise_reduction=arnndn` with an empty `nr_model` must fail with a readable message, not inside ffmpeg.
-6. The panel must still render when the bridge sends no `sections` array (schema-derived fallback) — `sectionOrder` at `content.js:643`.
+4. `noise_reduction=arnndn` with an empty `nr_model` must fail with a readable message, not inside ffmpeg.
+5. The panel must still render when the bridge sends no `sections` array (schema-derived fallback) — `sectionOrder` at `content.js:643`.
 
 ---
 
 ### Task 1: Advanced section — schema, bridge payload, collapsed panel
 
 **Files:**
-- Modify: `tools/settings.py` (`SECTIONS` :32, new `SECTION_META`, 19 fields appended to `SCHEMA` before the closing `]` at :270, new `sections_json()`)
+- Modify: `tools/settings.py` (`SECTIONS` :32, new `SECTION_META`, 18 fields appended to `SCHEMA` before the closing `]` at :270, new `sections_json()`)
 - Modify: `bridge/spottytube_bridge.py:448`
 - Modify: `extension/content.js` (CSS block ~:138-212, `sectionOrder` :643, `renderFields` :654)
 - Test: `tests/test_settings.py`, `tests/test_bridge.py`, `tests/test_widget_wiring.mjs`
@@ -44,10 +43,10 @@ The spec's silence on these inputs is not permission for them to break:
 **Interfaces:**
 - Produces: `settings.SECTION_META = {"advanced": {"collapsible": True, "collapsed": True}}`.
 - Produces: `settings.sections_json() -> list[dict]`, one `{"key", "label", "collapsible", "collapsed"}` per `SECTIONS` entry, defaults filled from `SECTION_META`.
-- Produces: 19 new schema keys, exactly the spec's table. `(key, control, default, range/choices)`:
+- Produces: 18 new schema keys, exactly the spec's table (mono output was dropped from it). `(key, control, default, range/choices)`:
   `edge_fade` (select, `declick`, off/declick/loop), `edge_fade_ms` (number, 5, 1-200),
   `true_peak` (checkbox, False), `true_peak_dbtp` (number, -1.0, -6..0),
-  `cut_seek` (select, `fast`, fast/accurate), `output_channels` (select, `stereo`, stereo/mono),
+  `cut_seek` (select, `fast`, fast/accurate),
   `loudnorm_tp` (number, -1.5, -6..0), `loudnorm_lra` (number, 11, 1-50),
   `loudnorm_mode` (select, `dynamic`, dynamic/linear),
   `highpass` (checkbox, False), `highpass_hz` (number, 30, 0-200), `dc_shift` (checkbox, False),
@@ -72,7 +71,6 @@ def test_every_new_field_defaults_match_the_spec():
     assert defaults["true_peak"] is False
     assert defaults["true_peak_dbtp"] == -1.0
     assert defaults["cut_seek"] == "fast"
-    assert defaults["output_channels"] == "stereo"
     assert defaults["loudnorm_tp"] == -1.5
     assert defaults["loudnorm_lra"] == 11
     assert defaults["loudnorm_mode"] == "dynamic"
@@ -112,7 +110,7 @@ Add `("advanced", "Advanced")` to `SECTIONS` immediately after the `audio` entry
 SECTION_META = {"advanced": {"collapsible": True, "collapsed": True}}
 ```
 
-Append the 19 field dicts to `SCHEMA` (values verbatim from the spec's table; each is the existing field shape: `key`, `section`, `scope`, `label`, `control`, `default`, `help`, plus `choices` for selects and `min`/`max`/`step` for numbers). Add after `defaults()`:
+Append the 18 field dicts to `SCHEMA` (values verbatim from the spec's table; each is the existing field shape: `key`, `section`, `scope`, `label`, `control`, `default`, `help`, plus `choices` for selects and `min`/`max`/`step` for numbers). Add after `defaults()`:
 
 ```python
 def sections_json():
@@ -180,7 +178,7 @@ Expected: PASS (both new tests and the existing ones).
 
 ```bash
 git add tools/settings.py bridge/spottytube_bridge.py extension/content.js tests/test_settings.py tests/test_bridge.py tests/test_widget_wiring.mjs
-git commit -m "feat(settings): advanced section with 19 fields, collapsed by default"
+git commit -m "feat(settings): advanced section with 18 fields, collapsed by default"
 ```
 
 ---
@@ -355,7 +353,7 @@ git commit -m "feat(audio): expose loudnorm true peak, LRA and single/two-pass m
 
 ---
 
-### Task 4: Resample quality, dither, and mono output
+### Task 4: Resample quality and dither
 
 **Files:**
 - Modify: `tools/audio_chain.py` (`cut_filters` resample step, new `final_filters`)
@@ -363,8 +361,7 @@ git commit -m "feat(audio): expose loudnorm true peak, LRA and single/two-pass m
 - Test: `tests/test_audio_chain.py`, `tests/test_sample_tool.py`
 
 **Interfaces:**
-- Produces: `audio_chain.final_filters(cfg, channels) -> str | None` — `None` when no post-retime pass is needed, else a comma-joined `-af` expression.
-- Mono is emitted as `pan=stereo|c0=c0|c1=c0` (dual mono, 2 channels). Never `-ac 1`.
+- Produces: `aresample` options inside `cut_filters` — `resampler=soxr` when selected, `dither_method` when a dither other than `none` is selected, merged into one `aresample=` when both apply.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -374,45 +371,37 @@ def test_resampler_and_dither_flags():
     assert "dither_method=triangular" in ac.cut_filters(cfg(dither="triangular"), 5.0)
     assert "aresample" not in ac.cut_filters(cfg(resampler="swr", dither="none"), 5.0)
 
-def test_default_chain_needs_no_final_pass():
-    assert ac.final_filters(cfg(), 2) is None
-
-def test_mono_is_dual_mono_not_one_channel():
-    out = ac.final_filters(cfg(output_channels="mono"), 2)
-    assert out == "pan=stereo|c0=c0|c1=c0"
-    assert "-ac 1" not in (out or "")
+def test_resampler_and_dither_merge_into_one_filter():
+    out = ac.cut_filters(cfg(resampler="soxr", dither="triangular_hp"), 5.0)
+    assert out.count("aresample=") == 1
+    assert "resampler=soxr" in out and "dither_method=triangular_hp" in out
 ```
 
-- [ ] **Step 2: Run to verify they fail** — FAIL (`final_filters` missing).
+- [ ] **Step 2: Run to verify they fail** — FAIL (`aresample` absent from the chain).
 
 - [ ] **Step 3: Implement**
 
-Resample: in `cut_filters`, after loudnorm, if `resampler == "soxr"` add `aresample=resampler=soxr`; if `dither != "none"` add `aresample=dither_method=<dither>` (merge into one `aresample=` when both apply).
+In `cut_filters`, after loudnorm, build one `aresample=` filter: `resampler=soxr` when `resampler == "soxr"` and `dither_method=<dither>` when `dither != "none"`; append it only if at least one option applies (so the default chain still contains no `aresample`).
 
-`final_filters(cfg, channels)`: `parts = []`; if `output_channels == "mono"` add the pan expression; return `",".join(parts) or None`. (The limiter joins here in Task 5.)
+The post-retime final pass is introduced in Task 5, where the limiter gives it something to do.
 
 - [ ] **Step 4: Run to verify they pass** — PASS.
 
-- [ ] **Step 5: Wire the pass into `build_sample` and pin the channel invariant**
-
-After `retime_segment` (:931), when `audio_chain.final_filters(cfg, wb.CHANNELS)` is not `None`, run one ffmpeg pass writing through `wb.convert`, then re-check `wav_seconds`. Update the "default path spawns no extra pass" assertion:
+- [ ] **Step 5: Integration test — the resampler flag reaches ffmpeg**
 
 ```python
-def test_default_settings_add_no_extra_pass(self):
-    # monkeypatch subprocess.run / count invocations of retime+finalize
-    ...  # assert exactly two ffmpeg passes on the default path
-
-def test_mono_output_is_two_channel(self):
-    sample_tool.build_sample(str(src), "0:00", "0:05", install=False, cfg=...)
-    info = sk_usb.inspect_wav(serialised_bytes)
-    assert info["channels"] == 2   # Review Focus 4
+def test_soxr_chain_still_produces_a_valid_spotykach_wav(self):
+    sample_tool.extract_segment(src, dst, 0.0, 1.0,
+                                cfg=cfg_with(resampler="soxr", dither="triangular"))
+    assert wav_builder.probe(dst) is None          # existing "would the deck take it" helper
+    assert sample_tool.wav_seconds(dst) == pytest.approx(1.0, abs=0.05)
 ```
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add tools/audio_chain.py tools/sample_tool.py tests/test_audio_chain.py tests/test_sample_tool.py
-git commit -m "feat(audio): resampler/dither selection and dual-mono output"
+git commit -m "feat(audio): resampler and dither selection"
 ```
 
 ---
@@ -425,18 +414,18 @@ git commit -m "feat(audio): resampler/dither selection and dual-mono output"
 - Test: `tests/test_audio_chain.py`, `tests/test_sample_tool.py`
 
 **Interfaces:**
-- Produces: `final_filters` appends `alimiter=limit=<linear>:level=off` when `true_peak` is on, `linear = 10 ** (true_peak_dbtp / 20)` rounded to 6 places.
+- Produces: `audio_chain.final_filters(cfg) -> str | None` — `None` when no post-retime pass is needed, else a comma-joined `-af` expression containing `alimiter=limit=<linear>:level=off` when `true_peak` is on, `linear = round(10 ** (true_peak_dbtp / 20), 6)`.
 - Produces: `cut_filters` appends `afftdn` or `arnndn=model=<nr_model>` when `noise_reduction` is on.
 - Produces: `audio_chain.NoiseModelMissing(ValueError)` raised when `nr_method == "arnndn"` and `nr_model` is empty.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_limiter_is_linear_ceiling_applied_last():
-    out = ac.final_filters(cfg(true_peak=True, true_peak_dbtp=-1.0), 2)
-    assert out == "alimiter=limit=0.891251:level=off"
-    out = ac.final_filters(cfg(output_channels="mono", true_peak=True), 2)
-    assert out.index("pan=") < out.index("alimiter=")     # limit the final signal
+def test_limiter_is_a_linear_ceiling():
+    assert ac.final_filters(cfg(true_peak=True, true_peak_dbtp=-1.0)) == "alimiter=limit=0.891251:level=off"
+
+def test_default_settings_add_no_extra_pass():
+    assert ac.final_filters(cfg()) is None                # Review Focus 3
 
 def test_noise_reduction_methods():
     assert ac.cut_filters(cfg(noise_reduction=True), 5.0).count("afftdn") == 1
@@ -453,7 +442,7 @@ def test_arnndn_without_a_model_refuses_clearly():
 
 - [ ] **Step 3: Implement**
 
-NR in `cut_filters` sits right after the DC step (before trim/fades). `alimiter` is appended in `final_filters` after the pan.
+NR in `cut_filters` sits right after the DC step (before trim/fades). `final_filters(cfg)` returns `None` unless `true_peak` is on, in which case it returns the single `alimiter` term.
 
 - [ ] **Step 4: Run to verify they pass** — PASS.
 
@@ -471,7 +460,7 @@ Run: `pytest tests/test_sample_tool.py -v` — PASS.
 
 - [ ] **Step 6: Update `README.md`**
 
-Document the Advanced group in the settings section: one line per setting, the default, and what it costs (each new pass adds wall time). Mention that mono is dual mono because the firmware refuses 1-channel files.
+Document the Advanced group in the settings section: one line per setting, the default, and what it costs (each new pass adds wall time). Note that the tool always writes stereo, because the firmware refuses 1-channel files.
 
 - [ ] **Step 7: Commit**
 
@@ -484,6 +473,6 @@ git commit -m "feat(audio): final true-peak limiter and optional noise reduction
 
 ## Self-Review
 
-- **Spec coverage:** the 9 topics map to Tasks 2-5 (fades/trim/highpass/DC in 2, loudnorm in 3, resample/dither/mono in 4, limiter/NR in 5); the collapsed section and schema are Task 1; the Hardware results and D1 default-on edge fade are Task 1 (default) + Task 2 (behavior).
-- **Review Focus:** 1 → Task 2 step 6; 2 → Task 2 step 1 (fade clamp); 3 → Task 4 step 5; 4 → Task 4 step 5; 5 → Task 5 step 1; 6 → Task 1 step 6.
-- **Type consistency:** `cfg` is the full settings dict everywhere; `cut_filters(cfg, seconds, dc_offset=0.0)` and `final_filters(cfg, channels)` keep one signature through Tasks 2-5; `final_filters` returns `None` (not `""`) so callers can test truthiness.
+- **Spec coverage:** the 8 delivered topics map to Tasks 2-5 (fades/trim/highpass/DC in 2, loudnorm in 3, resample/dither in 4, limiter/NR in 5); mono is dropped (spec D6). The collapsed section and schema are Task 1; the Hardware results and D1 default-on edge fade are Task 1 (default) + Task 2 (behavior).
+- **Review Focus:** 1 → Task 2 step 6; 2 → Task 2 step 1 (fade clamp); 3 → Task 5 step 1; 4 → Task 5 step 1; 5 → Task 1 step 6.
+- **Type consistency:** `cfg` is the full settings dict everywhere; `cut_filters(cfg, seconds, dc_offset=0.0)` keeps one signature through Tasks 2-5; `final_filters(cfg)` returns `None` (not `""`) so callers can test truthiness.
