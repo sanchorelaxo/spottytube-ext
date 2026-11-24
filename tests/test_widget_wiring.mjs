@@ -216,9 +216,41 @@ test("the settings panel is a flex column: scrolling body, pinned footer", () =>
   assert.ok(iSave > iFoot && iRestart > iSave, "save and restart are pinned in the footer");
 });
 
-test("the scrolling body carries a visible scrollbar", () => {
-  assert.match(content, /\.sbody\s*{[^}]*scrollbar-width:\s*thin/s);
-  assert.match(content, /\.sbody::-webkit-scrollbar\s*{/);
+test("the scrolling body hides its scrollbar but still scrolls", () => {
+  // Deliberate change: expanding Advanced outgrows the 78vh panel, so the
+  // body scrolls the whole list and the scrollbar stays hidden. It was
+  // "thin" before; a visible bar is not wanted here.
+  assert.match(content, /\.sbody\s*{[^}]*overflow-y:\s*auto/s);
+  assert.match(content, /\.sbody\s*{[^}]*scrollbar-width:\s*none/s);
+  assert.match(content, /\.sbody::-webkit-scrollbar\s*{\s*width:\s*0;\s*height:\s*0;\s*}/);
+  assert.doesNotMatch(content, /scrollbar-width:\s*thin/);
+  assert.doesNotMatch(content, /::-webkit-scrollbar-thumb/);
+  assert.doesNotMatch(content, /::-webkit-scrollbar-track/);
+});
+
+test("the advanced group is a collapsible section driven by the bridge", () => {
+  assert.match(content, /section\.collapsible/);
+  assert.match(content, /"ssec toggle"/);
+  assert.match(content, /aria-expanded/);
+  assert.match(content, /settingsState\.collapsed/);
+  assert.match(content, /group\.hidden/);
+});
+
+test("a collapsed group hides its rows through the author rule", () => {
+  // [hidden] alone loses to an author display rule, same trap as the panel.
+  assert.match(content, /\.sgroup\[hidden\]\s*{\s*display:\s*none;\s*}/);
+  assert.match(content, /collapsed:\s*new Map\(\)/);
+});
+
+test("neither the group nor the panel nests a second scroller", () => {
+  const afterGroup = content.slice(content.indexOf(".sgroup"));
+  const block = afterGroup.slice(0, afterGroup.indexOf("}") + 1);
+  assert.doesNotMatch(block, /max-height|overflow/);
+});
+
+test("both section payload shapes are accepted", () => {
+  assert.match(content, /Array\.isArray\(entry\)/);
+  assert.match(content, /entry\.key/);
 });
 
 test("opening settings clamps the tall panel back into the viewport", () => {

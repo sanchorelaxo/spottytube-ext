@@ -69,6 +69,26 @@ class ServerCase(unittest.TestCase):
         self.fail("job did not finish")
 
 
+class TestSettingsPayload(ServerCase):
+    """/settings is what the panel renders from: schema plus section hints."""
+
+    def test_sections_carry_the_collapse_hints(self):
+        status, body, _ = self.request("/settings")
+        self.assertEqual(status, 200)
+        by_key = {entry["key"]: entry for entry in body["sections"]}
+        self.assertEqual(by_key["advanced"]["label"], "Advanced")
+        self.assertTrue(by_key["advanced"]["collapsible"])
+        self.assertTrue(by_key["advanced"]["collapsed"])
+        self.assertFalse(by_key["audio"]["collapsible"])
+
+    def test_every_schema_section_is_announced(self):
+        _, body, _ = self.request("/settings")
+        announced = {entry["key"] for entry in body["sections"]}
+        self.assertTrue({field["section"] for field in body["schema"]} <= announced)
+        self.assertEqual([entry["key"] for entry in body["sections"]],
+                         [key for key, _ in bridge.app_settings.SECTIONS])
+
+
 class TestParsing(unittest.TestCase):
     def test_accepts_ss_mmss_hhmmss(self):
         self.assertEqual(bridge.parse_time("45"), 45.0)

@@ -445,7 +445,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True,
                              "settings": app_settings.load(),
                              "schema": app_settings.schema_json(),
-                             "sections": [list(s) for s in app_settings.SECTIONS]})
+                             "sections": app_settings.sections_json()})
             return
 
         self._send(404, {"ok": False, "error": "not found"})

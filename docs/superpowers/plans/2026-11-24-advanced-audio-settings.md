@@ -28,7 +28,9 @@ The spec's silence on these inputs is not permission for them to break:
 2. A segment shorter than twice the fade length: the fade-out `st` must clamp at 0, never negative.
 3. The default path must not accidentally grow a third ffmpeg pass or change output bytes.
 4. `noise_reduction=arnndn` with an empty `nr_model` must fail with a readable message, not inside ffmpeg.
-5. The panel must still render when the bridge sends no `sections` array (schema-derived fallback) — `sectionOrder` at `content.js:643`.
+5. The panel must still render when the bridge sends no `sections` array, and when it sends the old `[key, label]` arrays — `sectionOrder` at `content.js:643` must normalize both shapes.
+6. Expanding Advanced must not clip: every row reachable by scrolling inside the 78vh panel, with no visible scrollbar and no second, nested scroll area.
+7. A collapsible head is a `div`, not a button, so Enter/Space must be wired by hand — otherwise the section is mouse-only.
 
 ---
 
@@ -37,7 +39,7 @@ The spec's silence on these inputs is not permission for them to break:
 **Files:**
 - Modify: `tools/settings.py` (`SECTIONS` :32, new `SECTION_META`, 18 fields appended to `SCHEMA` before the closing `]` at :270, new `sections_json()`)
 - Modify: `bridge/spottytube_bridge.py:448`
-- Modify: `extension/content.js` (CSS block ~:138-212, `sectionOrder` :643, `renderFields` :654)
+- Modify: `extension/content.js` (CSS block ~:138-212 including the `.sbody` scrollbar rules :176-183, `sectionOrder` :643, `renderFields` :654, `settingsState` :548)
 - Test: `tests/test_settings.py`, `tests/test_bridge.py`, `tests/test_widget_wiring.mjs`
 
 **Interfaces:**
@@ -54,7 +56,8 @@ The spec's silence on these inputs is not permission for them to break:
   `trim_silence` (checkbox, False), `trim_threshold_db` (number, -50, -90..-20),
   `noise_reduction` (checkbox, False), `nr_method` (select, `afftdn`, afftdn/arnndn),
   `nr_model` (text, `""`).
-- Produces: `settingsState.collapsed` (Map key -> bool) in `content.js`; `.ssec.toggle` / `.sgroup`.
+- Produces: `settingsState.collapsed` (Map key -> bool) in `content.js`; `.ssec.toggle` / `.sgroup`; the toggle is keyboard-operable and carries `aria-expanded`.
+- Scroll contract: `.sbody` is the panel's only scroll container (`overflow-y: auto; min-height: 0; flex: 1 1 auto`, inside a `max-height: 78vh` flex panel), so an expanded Advanced group is reachable end to end. Its scrollbar stays hidden (`scrollbar-width: none`, `::-webkit-scrollbar { width: 0; height: 0; }`). No nested scroller: `.sgroup` must never get its own `max-height`/`overflow`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -152,27 +155,41 @@ Run: `pytest tests/test_bridge.py -v` — Expected: PASS.
 
 `renderFields` (:654): for each section, create the head as today; when `section.collapsible`, add class `toggle` to the head plus a `<span class="caret">`, create a `<div class="sgroup">`, append the rows into the group instead of `el.sfields`, and set `group.hidden = settingsState.collapsed.get(section.key) ?? section.collapsed`. The head's click handler toggles `group.hidden` and stores the new value in `settingsState.collapsed` (a Map added to the settings state object alongside `inputs`). CSS: `.ssec.toggle { cursor: pointer; }`, `.ssec .caret { float: right; }`, `.sgroup[hidden] { display: none; }`.
 
-Add to `tests/test_widget_wiring.mjs` (the harness already boots the panel and reads `settingsState`):
+The widget harness does **not** simulate the DOM — it reads `content.js` as text and asserts the wiring contract (see its header comment). Assert on the source, as the rest of that file does:
 
 ```js
-test("advanced group renders collapsed and toggles", () => {
-  const head = findSettingsHead("Advanced");
-  assert.equal(head.classList.contains("toggle"), true);
-  const group = groupFor(head);
-  assert.equal(group.hidden, true);
-  head.dispatchEvent(new Event("click"));
-  assert.equal(group.hidden, false);
+test("the advanced group is a collapsible section driven by the bridge", () => {
+  assert.match(content, /section\.collapsible/);
+  assert.match(content, /classList\.add|className = section\.collapsible \? "ssec toggle"/);
+  assert.match(content, /aria-expanded/);
+  assert.match(content, /settingsState\.collapsed/);
+  assert.match(content, /group\.hidden/);
 });
 
-test("old-style section array still renders", () => {
-  settingsState.sections = [["audio", "Audio pipeline"], ["advanced", "Advanced"]];
-  renderFields();                       // must not throw
-  assert.ok(findSettingsHead("Advanced"));
+test("an expanded group is reachable without a visible scrollbar", () => {
+  assert.match(content, /\.sbody \{[^}]*overflow-y: auto/);
+  assert.match(content, /scrollbar-width: none/);
+  assert.doesNotMatch(content, /scrollbar-width: thin/);
+  assert.match(content, /\.sbody::-webkit-scrollbar \{ width: 0; height: 0; \}/);
+  assert.doesNotMatch(content, /::-webkit-scrollbar-thumb/);
+  assert.doesNotMatch(content, /\.sgroup[^}]*max-height/);   // no nested scroller
+});
+
+test("a collapsed group hides its rows through the author rule", () => {
+  assert.match(content, /\.sgroup\[hidden\] \{ display: none; \}/);
+  assert.match(content, /new Map\(\)/);                     // collapse memory
+});
+
+test("both section payload shapes are accepted", () => {
+  assert.match(content, /Array\.isArray\(entry\)/);
+  assert.match(content, /entry\.key/);
 });
 ```
 
+The collapse behaviour itself has no live-DOM test in this harness; keep the code small enough to read at a glance, and verify it by hand in the browser once at the end of the task.
+
 Run: `node --test tests/test_widget_wiring.mjs`
-Expected: PASS (both new tests and the existing ones).
+Expected: PASS (all new tests and the existing ones).
 
 - [ ] **Step 7: Commit**
 
@@ -474,5 +491,5 @@ git commit -m "feat(audio): final true-peak limiter and optional noise reduction
 ## Self-Review
 
 - **Spec coverage:** the 8 delivered topics map to Tasks 2-5 (fades/trim/highpass/DC in 2, loudnorm in 3, resample/dither in 4, limiter/NR in 5); mono is dropped (spec D6). The collapsed section and schema are Task 1; the Hardware results and D1 default-on edge fade are Task 1 (default) + Task 2 (behavior).
-- **Review Focus:** 1 → Task 2 step 6; 2 → Task 2 step 1 (fade clamp); 3 → Task 5 step 1; 4 → Task 5 step 1; 5 → Task 1 step 6.
+- **Review Focus:** 1 → Task 2 step 6; 2 → Task 2 step 1 (fade clamp); 3 → Task 5 step 1; 4 → Task 5 step 1; 5/6/7 → Task 1 step 6.
 - **Type consistency:** `cfg` is the full settings dict everywhere; `cut_filters(cfg, seconds, dc_offset=0.0)` keeps one signature through Tasks 2-5; `final_filters(cfg)` returns `None` (not `""`) so callers can test truthiness.

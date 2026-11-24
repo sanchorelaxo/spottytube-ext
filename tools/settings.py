@@ -31,11 +31,20 @@ from pathlib import Path
 # Panel order in the GUI.
 SECTIONS = (
     ("audio", "Audio pipeline"),
+    ("advanced", "Advanced"),
     ("defaults", "Save defaults"),
     ("device", "Device (config.txt)"),
     ("widget", "Widget"),
     ("bridge", "Bridge and paths"),
 )
+
+# Presentation hints per section. SECTIONS stays plain (key, label) pairs so
+# nothing that only wants the order has to learn a new shape; the panel asks
+# for these through sections_json(). "Advanced" is collapsed on first sight --
+# it holds the knobs that change the audio, and the panel is only 78vh tall.
+SECTION_META = {
+    "advanced": {"collapsible": True, "collapsed": True},
+}
 
 _CONFIG_KEYS = ("mid_ch_a", "mid_ch_b", "mid_ps_a", "mid_ps_b",
                 "pre_load", "slc_mn_a", "slc_mn_b")
@@ -267,6 +276,195 @@ SCHEMA = [
                 "~/.hermes/cache/spotykach. Point it at a bigger disk if "
                 "sources are large; existing cache files are not moved.",
     },
+
+    # --- advanced: the ffmpeg knobs, collapsed in the panel ----------------
+    {
+        "key": "edge_fade", "section": "advanced", "scope": "tool",
+        "label": "Edge fades", "control": "select",
+        "choices": [
+            _choice("off", "off (raw cut)"),
+            _choice("declick", "declick (fade in/out)"),
+            _choice("loop", "loop (fade both ends)"),
+        ],
+        "default": "declick",
+        "help": "Shape the cut boundary. Slicing through a loud waveform "
+                "leaves a step at each end that clicks on every trigger; "
+                "declick fades the first and last few milliseconds to kill "
+                "it. off leaves the cut raw and is the old behaviour.",
+    },
+    {
+        "key": "edge_fade_ms", "section": "advanced", "scope": "tool",
+        "label": "Fade length (ms)", "control": "number",
+        "min": 1, "max": 200, "step": 1,
+        "default": 5,
+        "help": "Length of the edge fades in milliseconds. 5 ms is inaudible "
+                "on a transient and enough to remove the click; longer "
+                "settings soften the attack noticeably. Only used when Edge "
+                "fades is not off.",
+    },
+    {
+        "key": "true_peak", "section": "advanced", "scope": "tool",
+        "label": "True-peak limiter", "control": "checkbox",
+        "default": False,
+        "help": "Run a final alimiter pass over the retimed sample, so peaks "
+                "pushed past full scale by the speed change cannot clip on "
+                "the deck. Costs one extra ffmpeg pass on every build.",
+    },
+    {
+        "key": "true_peak_dbtp", "section": "advanced", "scope": "tool",
+        "label": "Limiter ceiling (dBTP)", "control": "number",
+        "min": -6.0, "max": 0.0, "step": 0.5,
+        "default": -1.0,
+        "help": "Ceiling for the final limiter, in dB below full scale. "
+                "alimiter is a sample-peak limiter, so the -1.0 default "
+                "leaves margin for inter-sample peaks. Only used when "
+                "True-peak limiter is on.",
+    },
+    {
+        "key": "cut_seek", "section": "advanced", "scope": "tool",
+        "label": "Cut accuracy", "control": "select",
+        "choices": [
+            _choice("fast", "fast (keyframe seek)"),
+            _choice("accurate", "accurate (decode from start)"),
+        ],
+        "default": "fast",
+        "help": "How ffmpeg seeks to the cut start. fast jumps to the "
+                "nearest keyframe and decodes forward, which is quick on a "
+                "long source; accurate decodes from the file start and lands "
+                "frame-exact but takes longer.",
+    },
+    {
+        "key": "loudnorm_tp", "section": "advanced", "scope": "tool",
+        "label": "Loudness true peak", "control": "number",
+        "min": -6.0, "max": 0.0, "step": 0.5,
+        "default": -1.5,
+        "help": "loudnorm's true-peak ceiling in dBTP. -1.5 leaves headroom "
+                "for lossy playback; 0 allows full scale. Used when "
+                "Normalize loudness is on.",
+    },
+    {
+        "key": "loudnorm_lra", "section": "advanced", "scope": "tool",
+        "label": "Loudness range", "control": "number",
+        "min": 1, "max": 50, "step": 1,
+        "default": 11,
+        "help": "loudnorm's loudness range target. 11 suits music and keeps "
+                "its dynamics; smaller numbers flatten quiet passages. Used "
+                "when Normalize loudness is on.",
+    },
+    {
+        "key": "loudnorm_mode", "section": "advanced", "scope": "tool",
+        "label": "Loudness mode", "control": "select",
+        "choices": [
+            _choice("dynamic", "dynamic (one pass)"),
+            _choice("linear", "linear (measure, then correct)"),
+        ],
+        "default": "dynamic",
+        "help": "dynamic levels as it goes in a single pass. linear measures "
+                "the cut first and corrects it in a second, more predictable "
+                "pass, at the cost of one extra ffmpeg run. Used when "
+                "Normalize loudness is on.",
+    },
+    {
+        "key": "highpass", "section": "advanced", "scope": "tool",
+        "label": "High-pass rumble", "control": "checkbox",
+        "default": False,
+        "help": "High-pass the cut before it is retimed, to drop rumble and "
+                "handling noise below the cutoff. The deck cannot reproduce "
+                "deep sub-bass, so this frees headroom for what it can.",
+    },
+    {
+        "key": "highpass_hz", "section": "advanced", "scope": "tool",
+        "label": "High-pass cutoff (Hz)", "control": "number",
+        "min": 0, "max": 200, "step": 1,
+        "default": 30,
+        "help": "High-pass cutoff in Hz. 30 removes rumble without touching "
+                "musical bass; raise it for speech or a noisy recording. "
+                "Only used when High-pass rumble is on.",
+    },
+    {
+        "key": "dc_shift", "section": "advanced", "scope": "tool",
+        "label": "Remove DC offset", "control": "checkbox",
+        "default": False,
+        "help": "Measure the cut's DC offset and shift it out before "
+                "anything else runs. A DC offset eats headroom and shows up "
+                "as a click at the cut edges; the measurement costs one "
+                "short ffmpeg probe.",
+    },
+    {
+        "key": "resampler", "section": "advanced", "scope": "tool",
+        "label": "Resampler", "control": "select",
+        "choices": [
+            _choice("swr", "swr (ffmpeg built-in)"),
+            _choice("soxr", "soxr (higher quality)"),
+        ],
+        "default": "swr",
+        "help": "Resampler used when the sample rate has to change. swr is "
+                "ffmpeg's own and is always there; soxr is higher quality "
+                "when this ffmpeg was built with it, otherwise it is "
+                "rejected loudly.",
+    },
+    {
+        "key": "dither", "section": "advanced", "scope": "tool",
+        "label": "Dither", "control": "select",
+        "choices": [
+            _choice("none", "none"),
+            _choice("triangular", "triangular"),
+            _choice("triangular_hp", "triangular (noise-shaped)"),
+        ],
+        "default": "none",
+        "help": "Dither added while resampling. Triangular is the usual "
+                "choice when the bit depth drops; the noise-shaped variant "
+                "pushes that noise above the audible band. Left at none, "
+                "resampling stays bit-transparent in the ways that matter "
+                "for a 32-bit float deck.",
+    },
+    {
+        "key": "trim_silence", "section": "advanced", "scope": "tool",
+        "label": "Trim edge silence", "control": "checkbox",
+        "default": False,
+        "help": "Trim leading and trailing silence from the cut before it is "
+                "retimed, so the sample starts on its first sound. Uses a "
+                "peak threshold, not a gate: quiet material can be trimmed "
+                "if it sits below the threshold.",
+    },
+    {
+        "key": "trim_threshold_db", "section": "advanced", "scope": "tool",
+        "label": "Silence threshold (dB)", "control": "number",
+        "min": -90, "max": -20, "step": 1,
+        "default": -50,
+        "help": "How quiet counts as silence for the edge trim, in dB. -50 "
+                "ignores room tone; raise it toward -30 for hissier "
+                "sources. Only used when Trim edge silence is on.",
+    },
+    {
+        "key": "noise_reduction", "section": "advanced", "scope": "tool",
+        "label": "Noise reduction", "control": "checkbox",
+        "default": False,
+        "help": "Denoise the cut before retiming, for tape hiss, room noise "
+                "or broadband hum. Costs an extra filter pass and can dull "
+                "bright material, so it is off by default.",
+    },
+    {
+        "key": "nr_method", "section": "advanced", "scope": "tool",
+        "label": "Denoise method", "control": "select",
+        "choices": [
+            _choice("afftdn", "afftdn (spectral, no files)"),
+            _choice("arnndn", "arnndn (rnnoise, needs a model)"),
+        ],
+        "default": "afftdn",
+        "help": "Which denoiser to use. afftdn is ffmpeg's spectral denoiser "
+                "and needs no external files; arnndn is rnnoise, better on "
+                "speech but it needs the model file below. Only used when "
+                "Noise reduction is on.",
+    },
+    {
+        "key": "nr_model", "section": "advanced", "scope": "tool",
+        "label": "rnnoise model", "control": "text", "default": "",
+        "help": "Path to the rnnoise model (.rnnn) that arnndn loads. Left "
+                "empty, a build with arnndn selected stops with a clear "
+                "error rather than guessing at a model; afftdn needs no "
+                "file at all.",
+    },
 ]
 
 KEYS = tuple(field["key"] for field in SCHEMA)
@@ -285,6 +483,17 @@ def schema_json():
 def defaults():
     """Every key at its schema default."""
     return {field["key"]: field["default"] for field in SCHEMA}
+
+
+def sections_json():
+    """SECTIONS plus the panel's display hints, for GET /settings."""
+    out = []
+    for key, label in SECTIONS:
+        meta = SECTION_META.get(key, {})
+        out.append({"key": key, "label": label,
+                    "collapsible": bool(meta.get("collapsible")),
+                    "collapsed": bool(meta.get("collapsed"))})
+    return out
 
 
 def config_path():

@@ -173,14 +173,14 @@
       .sbody {
         padding: 10px 10px 6px; overflow-y: auto; min-height: 0; flex: 1 1 auto;
         display: grid; gap: 4px; align-content: start;
-        scrollbar-width: thin; scrollbar-color: #3a404c #16181d;
+        /* Expanding Advanced outgrows the 78vh panel, so this body is the one
+           and only scroll container: wheel, trackpad, touch and arrow keys all
+           reach every row. The scrollbar itself stays hidden -- the panel is a
+           sheet, not a scrollbox -- but nothing here clips or shortens rows. */
+        scrollbar-width: none;          /* Firefox */
+        -ms-overflow-style: none;       /* legacy Edge */
       }
-      .sbody::-webkit-scrollbar { width: 10px; }
-      .sbody::-webkit-scrollbar-track { background: #16181d; }
-      .sbody::-webkit-scrollbar-thumb {
-        background: #3a404c; border-radius: 5px; border: 2px solid #16181d;
-      }
-      .sbody::-webkit-scrollbar-thumb:hover { background: #4a515f; }
+      .sbody::-webkit-scrollbar { width: 0; height: 0; }
       .sfoot {
         flex: none; padding: 8px 10px 10px;
         border-top: 1px solid #262a33; background: #16181d;
@@ -190,6 +190,18 @@
         color: #7d8494; margin: 8px 0 2px;
       }
       .ssec:first-child { margin-top: 0; }
+      /* A collapsible head is a div, not a button, so it carries
+         aria-expanded and answers Enter/Space to stay keyboard-reachable. */
+      .ssec.toggle {
+        display: flex; align-items: center; justify-content: space-between;
+        cursor: pointer; user-select: none;
+      }
+      .ssec.toggle:hover { color: #d6dae2; }
+      .ssec.toggle::after { content: "▸"; font-size: 9px; }
+      .ssec.toggle[aria-expanded="true"]::after { content: "▾"; }
+      /* same trap as the panel: author display beats the UA [hidden] rule */
+      .sgroup { display: block; }
+      .sgroup[hidden] { display: none; }
       .srow { display: grid; grid-template-columns: 1fr 132px; gap: 8px; align-items: center; padding: 1px 0; }
       .srow label { font-size: 11.5px; color: #d6dae2; cursor: help; }
       .srow select, .srow input[type="number"], .srow input[type="text"] {
@@ -548,7 +560,8 @@
   const settingsState = {
     open: false, busy: false,
     schema: null, sections: [], values: null,
-    inputs: new Map(), fields: {}
+    inputs: new Map(), fields: {},
+    collapsed: new Map()          // section key -> bool, for this panel session
   };
 
   function applySettings(cfg) {
@@ -641,14 +654,22 @@
   }
 
   function sectionOrder(schema) {
-    if (settingsState.sections.length) return settingsState.sections;
-    const seen = [];
-    schema.forEach((field) => {
-      if (!seen.some((entry) => entry[0] === field.section)) {
-        seen.push([field.section, field.section]);
-      }
-    });
-    return seen;
+    // The bridge sends {key, label, collapsible, collapsed}; an older bridge,
+    // or the schema-only fallback below, may still send [key, label] pairs.
+    // Both shapes are accepted so a stale bridge cannot blank the panel.
+    const raw = settingsState.sections.length ? settingsState.sections : null;
+    const entries = raw || (() => {
+      const seen = [];
+      schema.forEach((field) => {
+        if (!seen.some((entry) => entry.key === field.section)) {
+          seen.push({ key: field.section, label: field.section });
+        }
+      });
+      return seen;
+    })();
+    return entries.map((entry) => (Array.isArray(entry)
+      ? { key: entry[0], label: entry[1], collapsible: false, collapsed: false }
+      : Object.assign({ collapsible: false, collapsed: false }, entry)));
   }
 
   function renderFields() {
@@ -662,17 +683,46 @@
     } else {
       el.ssave.disabled = false;
       sectionOrder(schema).forEach((section) => {
-        const fields = schema.filter((field) => field.section === section[0]);
+        const fields = schema.filter((field) => field.section === section.key);
         if (!fields.length) return;
         const head = document.createElement("div");
-        head.className = "ssec";
-        head.textContent = section[1];
+        head.className = section.collapsible ? "ssec toggle" : "ssec";
+        head.textContent = section.label;
         el.sfields.appendChild(head);
+        let host = el.sfields;
+        if (section.collapsible) {
+          // Rows go in their own box so collapsing hides them as a group. The
+          // remembered state wins over the bridge hint, so the section stays
+          // where the user left it while the panel is open.
+          const collapsed = settingsState.collapsed.has(section.key)
+            ? settingsState.collapsed.get(section.key) : !!section.collapsed;
+          const group = document.createElement("div");
+          group.className = "sgroup";
+          group.hidden = collapsed;
+          el.sfields.appendChild(group);
+          host = group;
+          const setOpen = (open) => {
+            group.hidden = !open;
+            head.setAttribute("aria-expanded", String(open));
+            settingsState.collapsed.set(section.key, !open);
+            clampIntoView(el.settings);    // the panel just changed height
+          };
+          head.setAttribute("aria-expanded", String(!collapsed));
+          head.tabIndex = 0;
+          head.setAttribute("role", "button");
+          head.addEventListener("click", () => setOpen(group.hidden));
+          head.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              setOpen(group.hidden);
+            }
+          });
+        }
         fields.forEach((field) => {
           settingsState.fields[field.key] = field;
           const row = fieldRow(field, values[field.key]);
           settingsState.inputs.set(field.key, row.input);
-          el.sfields.appendChild(row.node);
+          host.appendChild(row.node);
         });
       });
     }

@@ -310,5 +310,105 @@ class TestConfigPath(unittest.TestCase):
                 os.environ["XDG_CONFIG_HOME"] = old_xdg
 
 
+class TestAdvancedSection(TempSettingsCase):
+    """The collapsed "Advanced" group: schema, defaults, and payload hints.
+
+    The group is the one place where schema drives a new UI mechanism, so it
+    is pinned here: the 18 keys, the section they belong to, the defaults
+    (only the de-click fade is on), and the collapse hints the panel reads.
+    """
+
+    NEW_KEYS = (
+        "edge_fade", "edge_fade_ms",
+        "true_peak", "true_peak_dbtp",
+        "cut_seek",
+        "loudnorm_tp", "loudnorm_lra", "loudnorm_mode",
+        "highpass", "highpass_hz", "dc_shift",
+        "resampler", "dither",
+        "trim_silence", "trim_threshold_db",
+        "noise_reduction", "nr_method", "nr_model",
+    )
+
+    EXPECTED_DEFAULTS = {
+        "edge_fade": "declick", "edge_fade_ms": 5,
+        "true_peak": False, "true_peak_dbtp": -1.0,
+        "cut_seek": "fast",
+        "loudnorm_tp": -1.5, "loudnorm_lra": 11, "loudnorm_mode": "dynamic",
+        "highpass": False, "highpass_hz": 30, "dc_shift": False,
+        "resampler": "swr", "dither": "none",
+        "trim_silence": False, "trim_threshold_db": -50,
+        "noise_reduction": False, "nr_method": "afftdn", "nr_model": "",
+    }
+
+    def test_advanced_sits_right_after_audio(self):
+        names = [key for key, _ in st.SECTIONS]
+        self.assertIn("advanced", names)
+        self.assertEqual(names[names.index("audio") + 1], "advanced")
+
+    def test_the_section_holds_exactly_the_spec_keys(self):
+        actual = [field["key"] for field in st.SCHEMA if field["section"] == "advanced"]
+        self.assertEqual(sorted(actual), sorted(self.NEW_KEYS))
+        for key in self.NEW_KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(st.FIELDS[key]["scope"], "tool")
+
+    def test_defaults_match_the_spec(self):
+        for key, expected in self.EXPECTED_DEFAULTS.items():
+            with self.subTest(key=key):
+                self.assertEqual(st.defaults()[key], expected)
+
+    def test_only_the_declick_fade_is_on_by_default(self):
+        """D1: every other new setting must leave today's output untouched."""
+        on = [key for key, field in st.FIELDS.items()
+              if field["section"] == "advanced"
+              and field["control"] == "checkbox" and st.defaults()[key]]
+        self.assertEqual(on, [])
+        self.assertEqual(st.defaults()["edge_fade"], "declick")
+
+    def test_selects_carry_their_choices(self):
+        for key in self.NEW_KEYS:
+            field = st.FIELDS[key]
+            if field["control"] == "select":
+                with self.subTest(key=key):
+                    self.assertTrue(field.get("choices"))
+
+    def test_values_are_coerced_to_the_control(self):
+        merged, errors = st.validate(
+            {"edge_fade_ms": 5.4, "true_peak_dbtp": -0.5, "edge_fade": "loop",
+             "dc_shift": "true", "nr_model": "  /tmp/m.rnnn  "},
+            base=st.defaults())
+        self.assertEqual(errors, [])
+        self.assertEqual(merged["edge_fade_ms"], 5)
+        self.assertEqual(merged["true_peak_dbtp"], -0.5)
+        self.assertEqual(merged["edge_fade"], "loop")
+        self.assertIs(merged["dc_shift"], True)
+        self.assertEqual(merged["nr_model"], "/tmp/m.rnnn")
+
+    def test_bad_values_name_the_field(self):
+        _, errors = st.validate({"edge_fade": "declik", "loudnorm_lra": 99,
+                                 "highpass_hz": 900}, base=st.defaults())
+        joined = " ".join(errors)
+        self.assertIn("edge_fade must be one of", joined)
+        self.assertIn("loudnorm_lra must be between 1 and 50", joined)
+        self.assertIn("highpass_hz must be between 0 and 200", joined)
+
+    def test_sections_json_marks_advanced_collapsed(self):
+        entries = st.sections_json()
+        self.assertEqual([entry["key"] for entry in entries],
+                         [key for key, _ in st.SECTIONS])
+        by_key = {entry["key"]: entry for entry in entries}
+        self.assertTrue(by_key["advanced"]["collapsible"])
+        self.assertTrue(by_key["advanced"]["collapsed"])
+        self.assertEqual(by_key["advanced"]["label"], "Advanced")
+        self.assertFalse(by_key["audio"]["collapsible"])
+        self.assertFalse(by_key["audio"]["collapsed"])
+
+    def test_sections_json_is_json_ready(self):
+        json.dumps(st.sections_json())
+        for entry in st.sections_json():
+            self.assertEqual(set(entry),
+                             {"key", "label", "collapsible", "collapsed"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
