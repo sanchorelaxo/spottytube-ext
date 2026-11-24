@@ -81,7 +81,7 @@ existing output byte-identical*; see Decisions D1.
 
 | # | Topic | key(s) | control | default | range / choices |
 |---|-------|--------|---------|---------|-----------------|
-| 1 | Edge fades (de-click) | `edge_fade` | select | `off` | off / declick / loop |
+| 1 | Edge fades (de-click) | `edge_fade` | select | `declick` | off / declick / loop |
 |   |  | `edge_fade_ms` | number | 5 | 1–200 ms |
 | 2 | True-peak limiter | `true_peak` | checkbox | off | — |
 |   |  | `true_peak_dbtp` | number | −1.0 | −6…0 dBTP |
@@ -140,23 +140,43 @@ Final pass (new, runs only when needed):
     alimiter (true peak) and/or -ac <channels>
 
 `alimiter=limit=<linear>:level=off` with `linear = 10**(true_peak_dbtp/20)`,
-applied after retime so it protects the file that lands on the tape. `-ac 1`
-when `output_channels=mono`. The pass runs only if `true_peak` is on or the
-channel count differs from the source; otherwise the retime output is already
+applied after retime so it protects the file that lands on the tape.
+`output_channels=mono` downmixes to one channel and duplicates it into both
+(L=R), not `-ac 1` -- see Hardware results: the firmware refuses a 1-channel
+file, so "mono" means dual mono inside a 2-channel WAV. The pass runs only if
+`true_peak` is on or mono was requested; otherwise the retime output is already
 final and nothing extra is spawned. Note `alimiter` is a sample-peak limiter;
 the −1.0 dBTP default leaves margin so it behaves as a true-peak guard in
 practice (documented in the setting's help text).
 
+## Hardware results (mono probe, 2026-11-24)
+
+Unit: Spotykach proto 1.2, firmware 1.4.0, tapes `BGPRTY`, 6 slots,
+max_frames 2016000. Probe: `~/.hermes/cache/scratch/mono_probe.py` -- builds a
+2 s 440 Hz tone, re-headers it through `wb.convert` at 1 and 2 channels,
+uploads both through the device's own
+`upload_begin`/`upload_data`/`upload_commit` frames while bypassing
+`check_uploadable` (so the firmware's header check is what is tested), then
+reads the slot back. The target slot was empty and was removed afterwards.
+
+    stereo upload: OK
+    mono upload:   FAILED (DeviceError: device rejected the file format)  [status 12]
+    slot after:    channels=2  (the stereo control file that landed)
+    readback:      byte-exact vs the stereo upload
+
+Conclusion: the firmware accepts a 2-channel 48 kHz float WAV and refuses the
+1-channel equivalent. Mono output ships as dual mono.
+
 ## Failure modes and blast radius
 
-1. **Mono breaks the duration math.** `sample_tool.wav_seconds` hardcodes
-   `4 * wb.CHANNELS` (`sample_tool.py:586`, `:981`) and `wb.probe`'s slot
-   validation asserts `channels == CHANNELS` (`wav_builder.py:154`). A mono
-   file is 4 bytes/frame, so every duration check and the deck-ceiling guard
-   go wrong. `wb.convert(src, dst, sr, ch, fmt)` already takes `ch`, so the
-   plumbing is `wav_seconds(path, channels)` + a channels-aware slot check.
-   **Unverified: does the firmware load a 1-channel float WAV?** Needs a
-   hardware test before mono ships (O1).
+1. **Mono is not a 1-channel file.** Verified on hardware: firmware 1.4.0
+   rejects a 1-channel float WAV with status 12 ("device rejected the file
+   format") while the same code path accepts the 2-channel control. So
+   `output_channels=mono` cannot emit `-ac 1`; it downmixes to one channel and
+   duplicates into both, leaving a 2-channel WAV. That keeps the duration math
+   (`4 * wb.CHANNELS`, `sample_tool.py:586`, `:981`) and `wb.probe`'s channel
+   check (`wav_builder.py:154`) correct, so no `wav_seconds` change is needed.
+   The cost: card usage is not halved -- the file is still stereo-sized.
 2. **Trim vs the length guard.** `extract_segment` refuses a segment shorter
    than requested (`sample_tool.py:639`) as a "source shorter than range"
    error. `trim_silence` intentionally shortens the segment, so the guard must
@@ -176,9 +196,10 @@ practice (documented in the setting's help text).
 ## Decisions
 
 - **D1 Defaults.** Every new setting defaults to today's behavior (off, or the
-  current hardcode). No existing sample changes until a user opts in. This
-  applies even to edge fades, the "biggest audible win": it is one toggle away,
-  not on by default. (Confirm — see O3.)
+  current hardcode) **except edge fade**, which defaults to `declick` at 5 ms.
+  A short de-click at the cut boundary is the intended default: it is the
+  biggest audible win and is inaudible on material that did not click.
+  Everything else stays off. (Decided 2026-11-24.)
 - **D2 Section.** New key `advanced`, label "Advanced", placed in `SECTIONS`
   right after `audio`, collapsible and collapsed. `SECTIONS` stays 2-tuples;
   metadata lives in `SECTION_META`; the bridge serves objects.
@@ -186,14 +207,17 @@ practice (documented in the setting's help text).
 - **D4 Passes are conditional.** No new ffmpeg process when nothing needs it.
 - **D5 Phased rollout**, one phase at a time (plan below).
 
-## Open questions
+## Resolved on hardware (2026-11-24)
 
-- **O1** Does the Spotykach firmware accept a mono float WAV? Blocks the
-  default for `output_channels` only after a hardware test; mono ships opt-in.
-- **O2** DC removal: measure-then-shift (one probe pass) vs a fixed low
-  highpass. Recommend measure-then-shift.
-- **O3** Confirm D1: keep all new settings off by default, or turn the
-  de-click edge fade on by default because it is the largest audible win?
+- **O1 -- mono: the firmware refuses it.** Tested against a connected Spotykach
+  (proto 1.2, firmware 1.4.0, tapes `BGPRTY`, 6 slots). A 1-channel 48 kHz
+  float WAV uploaded through the device's own protocol is rejected with status
+  12, "device rejected the file format"; the identical path accepts the
+  2-channel control file. `output_channels=mono` therefore means dual mono
+  (downmix, duplicate to L and R), not `-ac 1`.
+- **O2 -- DC removal: measure-then-shift.** One `astats` probe pass reads the
+  mean offset, then `dcshift=shift=-<dc>`. Chosen over a fixed low highpass.
+- **O3 -- edge fade defaults ON** (`declick`, 5 ms). See D1.
 
 ## Phased implementation plan
 
@@ -210,9 +234,9 @@ and README updates, each committed on its own.
   are tapered, silence is trimmed, the length guard tolerates the trim.
 - **Phase 3 — Loudnorm completion.** `loudnorm_tp`/`loudnorm_lra` replace the
   hardcodes; `loudnorm_mode=linear` adds the measured two-pass path.
-- **Phase 4 — Resample, dither, channels.** Wire `aresample` options; make
-  `wav_seconds` and the slot check channels-aware; add the `-ac` plumbing;
-  hardware-verify mono (O1).
+- **Phase 4 — Resample, dither, channels.** Wire `aresample` options;
+  implement `output_channels=mono` as downmix-plus-duplicate (2-channel
+  output; no `wav_seconds` change, no `-ac 1`).
 - **Phase 5 — Final limiter and noise reduction.** The post-retime `alimiter`
   pass and the `afftdn`/`arnndn` path, with the conditional-pass rule (D4).
 
