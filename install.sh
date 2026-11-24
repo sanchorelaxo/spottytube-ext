@@ -72,26 +72,20 @@ chmod +x "$ROOT/bridge/spottytube_bridge.py"
 ln -sfn "$ROOT/bridge/spottytube_bridge.py" "$LINK"
 echo "linked  $LINK"
 
-chmod +x "$ROOT/tools/sample_tool.py" "$ROOT/tools/fetch_wav_builder.py"
+chmod +x "$ROOT/tools/sample_tool.py"
 if [ ! -f "$ROOT/tools/sample_tool.py" ]; then
     echo "error: sampling tool missing at $ROOT/tools/sample_tool.py" >&2
     exit 1
 fi
 echo "tool    $ROOT/tools/sample_tool.py"
 
-# wav_builder.py is not vendored here: it lives in the Spotykach skill repo and
-# is fetched so there is only ever one copy to keep correct. The fetcher checks
-# the API this project uses before replacing anything, so a bad download cannot
-# break a working install. Override with WAV_BUILDER_URL for an offline clone.
-echo "dep     fetching wav_builder.py"
-WB_ARGS=(--dest "$ROOT/tools/wav_builder.py")
-if [ -n "${WAV_BUILDER_URL:-}" ]; then
-    WB_ARGS+=(--url "$WAV_BUILDER_URL")
-fi
-if ! python3 "$ROOT/tools/fetch_wav_builder.py" "${WB_ARGS[@]}"; then
-    echo "error: could not fetch wav_builder.py (see above); sampling cannot run without it" >&2
+# wav_builder.py is vendored in tools/, so there is nothing to fetch: the
+# checkout carries the one copy the tool and the bridge both import.
+if [ ! -f "$ROOT/tools/wav_builder.py" ]; then
+    echo "error: wav_builder.py missing at $ROOT/tools/wav_builder.py" >&2
     exit 1
 fi
+echo "dep     $ROOT/tools/wav_builder.py"
 
 if [ ! -f "$ROOT/bridge/spottytube_bridge.py" ]; then
     echo "error: bridge script missing under $ROOT/bridge" >&2

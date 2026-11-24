@@ -30,15 +30,15 @@ Novices: read [INSTALL](INSTALL), which walks through it step by step.
     ./install.sh                     every Chrome, Brave or Chromium found
     ./install-chrome.sh              Chrome only (or --browser brave|chromium)
 
-That links `~/.local/bin/spottytube-bridge`, fetches `tools/wav_builder.py`,
-writes `~/.config/systemd/user/spottytube-bridge.service`, starts it and waits
-for `/health`. Re-running is safe.
+That links `~/.local/bin/spottytube-bridge`, writes
+`~/.config/systemd/user/spottytube-bridge.service`, starts it and waits for
+`/health`. Re-running is safe, and nothing is downloaded: the checkout is
+complete as cloned.
 
-`wav_builder.py` is not vendored in this repository: it is maintained in the
-Spotykach skill repo and `install.sh` (or `python3 tools/fetch_wav_builder.py`)
-downloads it. The fetcher checks the API this project uses before replacing a
-working copy, so a bad download cannot break an install. `WAV_BUILDER_URL`
-overrides the source for an offline clone.
+`tools/wav_builder.py` is vendored. It is maintained in the Spotykach skill
+repo, and the copy here is the one the tool and the bridge both import, so
+there is exactly one file to keep correct and nothing to fetch at install
+time. To pick up a newer upstream, copy it in and run the tests.
 
 Browser detection lives in `installers/browsers.sh` and finds native packages,
 snaps and Flatpaks by executable name; when the same name exists twice, PATH
@@ -196,19 +196,23 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -v            # 163 python tests
+    python3 -m unittest discover -s tests -t . -v       # 173 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 65 widget tests
+                tests/test_widget_wiring.mjs            # 72 widget tests
 
-- `tests/test_bridge.py` — 36 tests, real HTTP against `tests/stub_tool.py`, so
+`-t .` matters: without it the modules import top-level and `tests/__init__.py`
+never runs, so the suite reads your real settings file instead of the pinned
+temp path. Test modules import as `tests.test_x` on purpose.
+
+- `tests/test_bridge.py` — 40 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
-- `tests/test_settings.py` — 30 tests: every schema field carries hover help
+- `tests/test_settings.py` — 39 tests: every schema field carries hover help
   and its constraints, a missing/corrupt/partial file degrades to defaults per
   key, validation enforces select choices, number ranges and cross-field rules
   (speed envelope, MIDI channels differ, `tool_path` ends in `.py`), saves are
   atomic round-trips, and `SPOTTYTUBE_SETTINGS` overrides the path.
-- `tests/test_sample_tool.py` — 65 tests: time parsing, generic source ids,
+- `tests/test_sample_tool.py` — 68 tests: time parsing, generic source ids,
   transport choice, and placement on the tape chain against a real directory
   tree (bump cascades across tapes, append finds the first free slot, only a
   full Y/6 archives to the card root, read-back check, partial tapes), plus
@@ -218,10 +222,10 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
   leaks into a result and no root is needed. Covers native, snap and Flatpak
   Chrome/Brave/Chromium, the `--browser` contract, and the exit code for a name
   that does not exist.
-- `tests/test_wav_builder_dep.py` — 12 tests: the fetcher rejects a bad
-  download without clobbering a good copy, the upstream file still has the API
-  this project calls, the installed copy matches upstream, and a real ffmpeg
-  cut converts to a 48 kHz stereo float32 WAV.
+- `tests/test_wav_builder.py` — 6 tests: the vendored module still has the API
+  this project calls, its tape set and sample format agree with the rest of the
+  pipeline, exactly one copy exists in the repo, and a real ffmpeg cut converts
+  to a 48 kHz stereo float32 WAV.
 - `tests/test_speed.mjs` — the speed model in a `vm` sandbox: clamping to
   0.25x-2x, the `1.00x` label, stored length, snap on/off, and restoring a
   saved slider. `tests/test_selection.mjs` covers the pair state machine and
@@ -231,11 +235,12 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
   range, the snap control, `speed` in the sample payload, `playbackRate`
   polling, persistence, the countdown wiring (arm on in-point, auto
   out-point on elapse, flash classes, teardown), the settings panel (row
-  labels bound to controls, scrolling body, pinned footer, viewport clamp)
-  and the restart flow (worker posts `/restart`, waits for health, re-syncs).
+  labels bound to controls, collapsible sections, an expanded group scrolling
+  with the scrollbar hidden, pinned footer, viewport clamp) and the restart
+  flow (worker posts `/restart`, waits for health, re-syncs).
 
-The two upstream tests skip themselves when GitHub is unreachable; everything
-local, including the ffmpeg conversion, always runs.
+Nothing touches the network. The ffmpeg conversion tests skip themselves only
+when ffmpeg is not on the machine; the rest always runs.
 
 ## Troubleshooting
 
@@ -272,14 +277,13 @@ skipped instead of aborting the card scan.
     tools/settings.py              settings schema + store, read by bridge and tool
     tools/sk_usb.py                USB transport (raw termios + amidi, stdlib)
     tools/sk_install.py            transport contract + tape-chain placement
-    tools/fetch_wav_builder.py     fetches the upstream wav_builder dependency
-    tools/wav_builder.py           fetched, gitignored, not vendored
+    tools/wav_builder.py           vendored float32 writer (Spotykach skill repo)
     extension/manifest.json        MV3 content script
     extension/background.js        all fetches to the bridge happen here
     extension/content.js           the widget (shadow DOM, no page CSS leaks)
     extension/selection.js         start/end state machine + countdown (tested in node)
     extension/speed.js             playback-rate model (tested in node)
-    tests/                         bridge, tool, dependency and widget tests
+    tests/                         bridge, tool, settings and widget tests
 
 ## Licence
 
