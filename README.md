@@ -139,15 +139,20 @@ refuse a range whose stored length is over 42 s.
 ## Advanced audio settings
 
 The settings panel groups the pipeline controls under a collapsed
-**Advanced** heading (the gear panel, `tools/settings.py`). Everything there
-is off or neutral by default, so a build with the defaults is the single-cut
-build this tool has always made — byte for byte. One line per setting, its
-default, and what it costs:
+**Advanced** heading (the gear panel, `tools/settings.py`). Every setting here
+defaults to a neutral value, with one intentional carve-out: `edge_fade`
+defaults to `declick`, which by design tapers the first and last few
+milliseconds of every cut. So the promise for a build with the defaults is
+that it adds **no extra ffmpeg pass** and is byte-identical to the single-cut
+build this tool has always made *apart from that edge taper*. One line per
+setting, its default, and what it costs:
 
-**Edge fades** — always on:
+**Edge fades** — on by default:
 
-- `edge_fade` (`declick`) — a short fade at each edge of the cut so the loop
-  does not click where it joins. `off` is the only other value.
+- `edge_fade` (`declick`) — shapes the cut boundary so the loop does not click
+  where it joins. `declick` fades the first and last few milliseconds to kill
+  the click; `loop` fades both ends to match for a click-free wrap; `off`
+  leaves the cut raw and is the old behaviour.
 - `edge_fade_ms` (`5`) — fade length in milliseconds. The fade pair is
   symmetric and equal length.
 

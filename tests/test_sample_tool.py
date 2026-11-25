@@ -1633,6 +1633,31 @@ class TestFinalLimiterReal(unittest.TestCase):
             peak, 10 ** (-1.0 / 20) + 1e-3,
             msg=f"peak {peak:.6f} must sit at the -1 dBTP ceiling at 1.5x too")
 
+    def test_true_peak_sits_on_the_ceiling_after_a_varispeed_retime(self):
+        # M5: at a non-1x speed the re-read in retime_segment can nudge peaks,
+        # so applying the final pass BEFORE retime_segment (the mutation) lands
+        # an overshoot the shipped pass-after-retime does not have. Measured on
+        # this fixture: shipped 0.891251028 (at the ceiling), mutated 0.891319990
+        # -- 6.9e-5 over -- so a 1e-5 tolerance catches it while the 1e-3
+        # tolerance of the test above swallows it.
+        src = self.hot_source()
+        ceiling = 10 ** (-1.0 / 20)
+        source_peak = self.peak(src)
+        self.assertGreater(
+            source_peak, ceiling,
+            msg=f"the fixture must really be hot: source peak "
+                f"{source_peak:.9f} must exceed the ceiling {ceiling:.9f}")
+        result = self.build(src, 1.5, "cap15xvarispeed",
+                            true_peak=True, true_peak_dbtp=-1.0,
+                            speed_method="varispeed")
+        peak = self.peak(result.segment_path)
+        self.assertLessEqual(
+            peak, ceiling + 1e-5,
+            msg=f"1.5x varispeed peak {peak:.9f} must sit on the -1 dBTP "
+                f"ceiling {ceiling:.9f} to within 1e-5 (source peak "
+                f"{source_peak:.9f}); a final pass applied before "
+                f"retime_segment lands 6.9e-5 over")
+
     def test_true_peak_adds_exactly_one_spawn_at_1x_and_1_5x(self):
         # Counted from real spawns: the final pass is a single ffmpeg run.
         for speed in (1.0, 1.5):

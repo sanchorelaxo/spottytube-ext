@@ -326,6 +326,21 @@ class TestNoiseReduction(unittest.TestCase):
             self.chain(noise_reduction=True, nr_method="arnndn")
         self.assertIn("rnnoise model", str(caught.exception))
 
+    def test_arnndn_with_a_whitespace_only_model_refuses_too(self):
+        # M8: a blank-but-not-empty model is still no model. Without the
+        # ``.strip()`` the builder treats ``"   "`` as a real path and emits
+        # ``arnndn=model=   `` instead of refusing here, so a whitespace-only
+        # value stops being pinned (addendum B8: the refusal is decided on the
+        # settings alone and the path is never opened).
+        for blank in ("   ", "\t", "\n", " \t\n "):
+            with self.assertRaises(ac.NoiseModelMissing) as caught:
+                self.chain(noise_reduction=True, nr_method="arnndn",
+                           nr_model=blank)
+            self.assertIn(
+                "rnnoise model", str(caught.exception),
+                msg=f"a whitespace-only model {blank!r} must refuse, not emit "
+                    f"a filter; got {caught.exception!r}")
+
     def test_noise_model_missing_is_a_valueerror(self):
         self.assertTrue(issubclass(ac.NoiseModelMissing, ValueError))
 

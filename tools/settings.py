@@ -290,7 +290,8 @@ SCHEMA = [
         "help": "Shape the cut boundary. Slicing through a loud waveform "
                 "leaves a step at each end that clicks on every trigger; "
                 "declick fades the first and last few milliseconds to kill "
-                "it. off leaves the cut raw and is the old behaviour.",
+                "it, and loop fades both ends to match for a click-free "
+                "wrap. off leaves the cut raw and is the old behaviour.",
     },
     {
         "key": "edge_fade_ms", "section": "advanced", "scope": "tool",
