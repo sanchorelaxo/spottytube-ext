@@ -246,5 +246,54 @@ class TestAccurateSeek(unittest.TestCase):
                       msg="cfg=None must read as fast")
 
 
+class TestResampleAndDither(unittest.TestCase):
+    """Resample quality and dither: the single closing ``aresample`` term.
+
+    Both options share one filter (resampler first, then dither_method), and
+    the default swr + none adds nothing at all, so the cut chain stays
+    byte-identical to the legacy path (R-T4-1..3). Dither only *matters* when
+    the bit depth drops; on this tool's float32 output its term is inert, so
+    this class pins the chain term and nothing more (R-T4-4).
+    """
+
+    def chain(self, **over):
+        # edge_fade off so the aresample term is unambiguous in the string.
+        return ac.cut_filters(cfg(edge_fade="off", **over), 5.0)
+
+    def test_default_resampler_and_dither_add_no_aresample(self):
+        out = self.chain(resampler="swr", dither="none")
+        self.assertNotIn("aresample", out,
+                         msg=f"the default chain must carry no aresample: {out!r}")
+
+    def test_soxr_alone_is_one_soxr_term_with_no_rate_argument(self):
+        out = self.chain(resampler="soxr", dither="none")
+        self.assertEqual(out, "aresample=resampler=soxr",
+                         msg=f"soxr-only chain was {out!r}")
+
+    def test_dither_alone_is_one_dither_term(self):
+        out = self.chain(resampler="swr", dither="triangular")
+        self.assertEqual(out, "aresample=dither_method=triangular",
+                         msg=f"dither-only chain was {out!r}")
+
+    def test_both_merge_into_one_aresample_resampler_first(self):
+        out = self.chain(resampler="soxr", dither="triangular_hp")
+        self.assertEqual(out.count("aresample="), 1,
+                         msg=f"the two options must merge into one filter: {out!r}")
+        self.assertEqual(
+            out, "aresample=resampler=soxr:dither_method=triangular_hp",
+            msg=f"merged chain was {out!r}")
+
+    def test_resample_term_sits_after_loudnorm(self):
+        # Chain order contract: ... -> afade -> loudnorm -> aresample.
+        out = ac.cut_filters(
+            cfg(edge_fade="off", loudnorm=True, resampler="soxr",
+                dither="triangular"), 5.0)
+        self.assertLess(out.index("loudnorm"), out.index("aresample"),
+                        msg=f"aresample must follow loudnorm: {out!r}")
+        self.assertTrue(
+            out.endswith("aresample=resampler=soxr:dither_method=triangular"),
+            msg=f"aresample must close the chain: {out!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

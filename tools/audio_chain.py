@@ -9,7 +9,7 @@ are unit-testable without spawning a process.
 
 The filter order is fixed and meaningful::
 
-    highpass -> dcshift -> silenceremove -> afade -> loudnorm
+    highpass -> dcshift -> silenceremove -> afade -> loudnorm -> aresample
 
 * ``highpass`` removes sub-audible rumble first, so what follows — most
   visibly the ``silenceremove`` threshold — sees the high-passed signal. It
@@ -26,6 +26,20 @@ The filter order is fixed and meaningful::
   start past the shortened end and never land.
 * ``loudnorm`` closes the chain, so it measures and corrects the audio the
   fades have already shaped.
+* ``aresample`` is last: ``resampler=soxr`` when the resampler is not swr and
+  ``dither_method=<dither>`` when the dither is not none, merged into one
+  filter (``resampler`` first, then ``dither_method``). The term appears only
+  when at least one option applies, so the default chain carries no
+  ``aresample`` and stays byte-identical to the legacy cut (the ``-ar 48000``
+  output constraint makes this node perform the conversion; no rate argument
+  is needed, and adding one is byte-identical to leaving it off).
+
+  **Dither is inert on this tool's output.** The cut always writes
+  ``pcm_f32le`` (48 kHz float stereo), and dither only bites when the bit
+  depth drops; on a float32 output ``dither_method=triangular`` is
+  byte-identical to no dither, with and without soxr. The term is kept for
+  completeness and the setting's help text says as much — a green test here
+  proves the chain term, never that dither is audible.
 
 The de-click stays click-free even where the two tapers overlap: on a cut
 shorter than twice the fade, ``afade=t=out`` is anchored at 0 so the in- and
@@ -175,6 +189,41 @@ def _silence_trim(cfg):
             f"start_threshold={threshold}")
 
 
+def resample_filter(cfg):
+    """The single ``aresample`` term for the cut chain, or ``""`` (R-T4-1/2).
+
+    Both resample options share one filter, ``resampler`` first then
+    ``dither_method``:
+
+    * ``resampler=soxr`` when the resampler is anything but ``swr``. The
+      spec's exact form carries no rate argument: the cut pass already pins
+      ``-ar 48000`` on the output, so this graph node performs the
+      conversion, and ``aresample=resampler=soxr`` has been measured to
+      differ from the default ``swr`` result on a 44.1 kHz source (see
+      ``tests/test_sample_tool.py``).
+    * ``dither_method=<dither>`` when the dither is not ``none``. The value
+      is passed through verbatim, so a bad name fails loudly inside ffmpeg
+      rather than being silently dropped.
+
+    With the defaults (``swr`` + ``none``) this returns ``""`` and the cut
+    chain gains no ``aresample`` at all, which is what keeps the default
+    output byte-identical to the legacy path.
+
+    **The dither term is inert here.** This tool always writes float32 PCM,
+    and dither only changes the samples when the bit depth drops, so on the
+    shipped 48 kHz float stereo output the term is byte-for-byte a no-op. The
+    term is real; the audible effect is not, and no test claims one.
+    """
+    options = []
+    if str(cfg.get("resampler", "swr")) != "swr":
+        options.append("resampler=soxr")
+    if str(cfg.get("dither", "none")) != "none":
+        options.append(f"dither_method={cfg['dither']}")
+    if not options:
+        return ""
+    return "aresample=" + ":".join(options)
+
+
 def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
                 measured=None):
     """The comma-joined cut-pass filters for ``cfg``, or ``""`` if none apply.
@@ -185,7 +234,8 @@ def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
 
     ``loudnorm``, ``loudnorm_i`` and ``measured`` are threaded straight to
     :func:`loudnorm_filter` (each ``None`` falls back to ``cfg``/off). The
-    loudnorm term closes the chain, after the fades.
+    loudnorm term follows the fades, and :func:`resample_filter` closes the
+    chain, after loudnorm.
     """
     parts = [_highpass(cfg), _dc_shift(cfg, dc_offset)]
     trim = _silence_trim(cfg)
@@ -208,4 +258,5 @@ def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
         parts.append(_fade_in(cfg))
         parts.append(_fade_out(cfg, seconds))
     parts.append(loudnorm_filter(cfg, loudnorm, loudnorm_i, measured))
+    parts.append(resample_filter(cfg))
     return ",".join(part for part in parts if part)

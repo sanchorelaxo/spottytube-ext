@@ -9,11 +9,14 @@ what is being tested.
 Run: python3 -m unittest tests.test_sample_tool -v
 """
 
+import contextlib
+import hashlib
 import importlib.util
 import math
 import os
 import shutil
 import struct
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -771,6 +774,58 @@ def _rms(samples):
     return math.sqrt(sum(x * x for x in samples) / len(samples))
 
 
+def _decoded_pcm_md5(path):
+    """MD5 of ffmpeg's raw f32le decode of ``path`` (the samples, not the file).
+
+    The container header is dropped and only the decoded float samples are
+    hashed, so a resampler difference cannot be masked — or faked — by a
+    header byte.
+    """
+    result = subprocess.run(
+        [sample_tool.wb.ffmpeg(), "-v", "error", "-i", str(path),
+         "-f", "f32le", "-acodec", "pcm_f32le", "-"],
+        capture_output=True)
+    assert result.returncode == 0, result.stderr.decode()
+    return hashlib.md5(result.stdout).hexdigest()
+
+
+class _SpySubprocess:
+    """A stand-in for the ``subprocess`` module that records every argv.
+
+    ``run`` records and then delegates to the real module, so a pass still
+    happens for real; ``__getattr__`` forwards everything else (constants,
+    exceptions) so the spy is transparent to the caller.  Task 3b review
+    MINOR-2: the cut-seek and two-pass spies were byte-identical, so they live
+    here once.
+    """
+
+    def __init__(self, real, seen):
+        self._real = real
+        self._seen = seen
+
+    def run(self, cmd, *args, **kwargs):
+        self._seen.append(cmd)
+        return self._real.run(cmd, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@contextlib.contextmanager
+def _spy_passes():
+    """Patch both ``subprocess`` handles :func:`extract_segment` uses.
+
+    Yields the list of argv lists, in call order. ``extract_segment`` runs
+    ffmpeg through ``sample_tool.subprocess`` and re-headers through
+    ``wb.subprocess``; both must be watched or a pass is missed.
+    """
+    seen = []
+    spy = _SpySubprocess(sample_tool.subprocess, seen)
+    with mock.patch.object(sample_tool, "subprocess", spy), \
+         mock.patch.object(sample_tool.wb, "subprocess", spy):
+        yield seen
+
+
 class TestCutPassChain(unittest.TestCase):
     """extract_segment with a cfg: the advanced filters applied for real.
 
@@ -1259,19 +1314,7 @@ class TestCutSeekMode(unittest.TestCase):
 
     def capture(self, cfg, name="out.wav", loudnorm=False):
         """Every argv :func:`extract_segment` spawned, in order."""
-        real = sample_tool.subprocess
-        seen = []
-
-        class Spy:
-            def run(self, cmd, *args, **kwargs):
-                seen.append(cmd)
-                return real.run(cmd, *args, **kwargs)
-
-            def __getattr__(self, name):
-                return getattr(real, name)
-
-        with mock.patch.object(sample_tool, "subprocess", Spy()), \
-             mock.patch.object(sample_tool.wb, "subprocess", Spy()):
+        with _spy_passes() as seen:
             sample_tool.extract_segment(self.src, self.root / name, 0.3, 0.4,
                                         loudnorm=loudnorm, cfg=cfg)
         return seen
@@ -1336,6 +1379,12 @@ class TestCutSeekMode(unittest.TestCase):
         self.assertEqual(
             len(f), len(a),
             msg=f"fast cut {len(f)} frames, accurate cut {len(a)} frames")
+        # Absolute anchor: a 0.4 s cut at 48 kHz is exactly 19200 frames, so
+        # two *empty* outputs can no longer pass this fence on nothing
+        # (Task 3b review MINOR-1).
+        self.assertEqual(
+            len(f), 19200,
+            msg=f"a 0.4 s cut must be 19200 frames, got {len(f)}")
         first = (f[0], a[0]) if f and a else (float("nan"), float("nan"))
         drift = max((abs(x - y) for x, y in zip(f, a)), default=0.0)
         self.assertLess(
@@ -1388,19 +1437,7 @@ class TestTwoPassChainEquality(unittest.TestCase):
                    trim_silence=True, trim_threshold_db=-50,
                    highpass=True, highpass_hz=80,
                    edge_fade="declick", edge_fade_ms=5)
-        real = sample_tool.subprocess
-        seen = []
-
-        class Spy:
-            def run(self, cmd, *args, **kwargs):
-                seen.append(cmd)
-                return real.run(cmd, *args, **kwargs)
-
-            def __getattr__(self, name):
-                return getattr(real, name)
-
-        with mock.patch.object(sample_tool, "subprocess", Spy()), \
-             mock.patch.object(sample_tool.wb, "subprocess", Spy()):
+        with _spy_passes() as seen:
             sample_tool.extract_segment(src, self.root / "out.wav", 0.0, 1.0,
                                         loudnorm=True, cfg=cfg)
         measure = [cmd for cmd in seen
@@ -1427,6 +1464,102 @@ class TestTwoPassChainEquality(unittest.TestCase):
             p2_target.startswith(p1_target),
             msg=f"pass-1 loudnorm target {p1_target!r} must prefix pass-2's "
                 f"term {p2_target!r}; a shifted target changes the result")
+
+
+class TestResampleAndDitherReal(unittest.TestCase):
+    """Resample quality and dither on real ffmpeg (Task 4, R-T4-5).
+
+    The resampler is a real observable, not a string: on a 44.1 kHz source the
+    decoded float PCM of a ``soxr`` cut differs from the default ``swr`` cut.
+    Dither cannot change one byte of this tool's float32 output (R-T4-4), so its
+    only test is the chain term in ``tests/test_audio_chain.py`` -- the hashes
+    below exist to show the resampler term is the one that bites, not dither.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def source_44k(self, seconds=1.0):
+        """A 44.1 kHz stereo float WAV: the cut must resample it to 48 kHz."""
+        def gen(i):
+            t = i / 44100.0
+            v = (0.03 * math.sin(2 * math.pi * 997 * t)
+                 + 0.02 * math.sin(2 * math.pi * 3121 * t))
+            return (v, v)
+        path = self.root / "src44.wav"
+        path.write_bytes(_float_wav(gen, seconds, rate=44100))
+        return path
+
+    def test_soxr_cut_is_a_valid_spotykach_wav_of_the_right_length(self):
+        src = self.source_44k()
+        dst = self.root / "soxr.wav"
+        sample_tool.extract_segment(
+            src, dst, 0.0, 1.0,
+            cfg=_cfg(edge_fade="off", resampler="soxr", dither="triangular"))
+        self.assertTrue(
+            sample_tool.wb.is_valid(dst),
+            msg="the soxr cut must still be a 48 kHz float stereo WAV the "
+                "deck accepts")
+        self.assertAlmostEqual(wav_seconds(dst), 1.0, delta=0.05)
+
+    def test_soxr_changes_the_decoded_pcm_vs_swr(self):
+        # R-T4-5: hash the decoded float PCM, not the container, so a header
+        # byte cannot make this pass or fail for the wrong reason.
+        src = self.source_44k()
+        swr = self.root / "swr.wav"
+        soxr = self.root / "soxr.wav"
+        common = dict(edge_fade="off", dither="none")
+        sample_tool.extract_segment(src, swr, 0.0, 1.0,
+                                    cfg=_cfg(resampler="swr", **common))
+        sample_tool.extract_segment(src, soxr, 0.0, 1.0,
+                                    cfg=_cfg(resampler="soxr", **common))
+        swr_md5 = _decoded_pcm_md5(swr)
+        soxr_md5 = _decoded_pcm_md5(soxr)
+        self.assertNotEqual(
+            swr_md5, soxr_md5,
+            msg=f"soxr must change the decoded PCM of a 44.1 kHz cut "
+                f"(swr {swr_md5}, soxr {soxr_md5}) -- a match would mean the "
+                f"resampler setting is decorative")
+        self.assertTrue(sample_tool.wb.is_valid(swr))
+        self.assertTrue(sample_tool.wb.is_valid(soxr))
+
+    def test_resampler_and_dither_reach_the_cut_pass_argv(self):
+        src = self.source_44k()
+        cfg = _cfg(edge_fade="off", resampler="soxr", dither="triangular")
+        with _spy_passes() as seen:
+            sample_tool.extract_segment(src, self.root / "o.wav", 0.0, 1.0,
+                                        cfg=cfg)
+        cut = [cmd for cmd in seen if "-c:a" in cmd][0]
+        af = cut[cut.index("-af") + 1]
+        self.assertIn("aresample=resampler=soxr", af,
+                      msg=f"cut -af was {af!r}")
+        self.assertIn("dither_method=triangular", af,
+                      msg=f"cut -af was {af!r}")
+
+    def test_default_cfg_cut_has_no_aresample_and_spawns_no_extra_pass(self):
+        # R-T4-3: defaults (swr + none) add no aresample, and turning the
+        # resampler/dither on spawns no extra pass -- the resample happens
+        # inside the cut filter graph, not as a separate ffmpeg run.
+        src = self.source_44k()
+        with _spy_passes() as seen_default:
+            sample_tool.extract_segment(src, self.root / "d.wav", 0.0, 1.0,
+                                        cfg=_cfg())    # declick on, swr, none
+        with _spy_passes() as seen_soxr:
+            sample_tool.extract_segment(
+                src, self.root / "s.wav", 0.0, 1.0,
+                cfg=_cfg(resampler="soxr", dither="triangular_hp"))
+        cut = [cmd for cmd in seen_default if "-c:a" in cmd][0]
+        af = "" if "-af" not in cut else cut[cut.index("-af") + 1]
+        self.assertNotIn("aresample", af, msg=f"default cut -af was {af!r}")
+        self.assertEqual(
+            len(seen_default), 2,
+            msg=f"the baseline cut is the cut pass plus the re-header: "
+                f"{seen_default!r}")
+        self.assertEqual(
+            len(seen_default), len(seen_soxr),
+            msg=f"the resampler must add no ffmpeg pass: default spawned "
+                f"{len(seen_default)}, soxr spawned {len(seen_soxr)}")
 
 
 if __name__ == "__main__":
