@@ -295,5 +295,96 @@ class TestResampleAndDither(unittest.TestCase):
             msg=f"aresample must close the chain: {out!r}")
 
 
+class TestNoiseReduction(unittest.TestCase):
+    """The ``<NR>`` term: bare ``afftdn``, or ``arnndn`` with a model, or none.
+
+    ``cut_filters`` is a pure string builder -- it never stats the model -- so
+    the refusal is decided on the two settings alone (addendum B8, D5).
+    """
+
+    def chain(self, **over):
+        return ac.cut_filters(cfg(**over), 5.0, dc_offset=0.02)
+
+    def test_default_adds_no_denoiser(self):
+        out = ac.cut_filters(cfg(), 5.0)
+        self.assertNotIn("afftdn", out, msg=f"chain was {out!r}")
+        self.assertNotIn("arnndn", out, msg=f"chain was {out!r}")
+
+    def test_afftdn_is_the_default_method_and_ships_bare(self):
+        out = self.chain(noise_reduction=True)
+        self.assertEqual(out.count("afftdn"), 1, msg=f"chain was {out!r}")
+        self.assertNotIn("afftdn=", out, msg=f"afftdn must ship bare: {out!r}")
+
+    def test_arnndn_uses_the_configured_model_verbatim(self):
+        out = self.chain(noise_reduction=True, nr_method="arnndn",
+                         nr_model="/x/y.rnnn")
+        self.assertIn("arnndn=model=/x/y.rnnn", out, msg=f"chain was {out!r}")
+        self.assertNotIn("afftdn", out, msg=f"chain was {out!r}")
+
+    def test_arnndn_without_a_model_refuses_clearly(self):
+        with self.assertRaises(ac.NoiseModelMissing) as caught:
+            self.chain(noise_reduction=True, nr_method="arnndn")
+        self.assertIn("rnnoise model", str(caught.exception))
+
+    def test_noise_model_missing_is_a_valueerror(self):
+        self.assertTrue(issubclass(ac.NoiseModelMissing, ValueError))
+
+    def test_model_path_is_not_opened_by_the_builder(self):
+        # The brief's own test passes /x/y.rnnn, which does not exist: the
+        # builder must emit it, not reject it (addendum B8).
+        absent = "/definitely/absent/nope.rnnn"
+        out = self.chain(noise_reduction=True, nr_method="arnndn",
+                         nr_model=absent)
+        self.assertEqual(out.count(f"arnndn=model={absent}"), 1,
+                         msg=f"chain was {out!r}")
+
+    def test_nr_term_sits_after_dc_and_before_the_trim(self):
+        out = ac.cut_filters(
+            cfg(highpass=True, dc_shift=True, noise_reduction=True,
+                trim_silence=True), 5.0, dc_offset=0.02)
+        self.assertLess(out.index("dcshift"), out.index("afftdn"),
+                        msg=f"NR must follow dcshift: {out!r}")
+        self.assertLess(out.index("afftdn"), out.index("silenceremove"),
+                        msg=f"NR must precede the trim: {out!r}")
+
+    def test_nr_off_with_arnndn_selected_is_silent(self):
+        out = self.chain(noise_reduction=False, nr_method="arnndn")
+        self.assertNotIn("arnndn", out, msg=f"chain was {out!r}")
+
+
+class TestFinalLimiter(unittest.TestCase):
+    """``final_filters``: the post-retime true-peak limiter term, or ``None``.
+
+    It is a separate pass, not part of the cut chain: at 1x ``retime_segment``
+    copies the file and spawns no ffmpeg, so the term must live outside
+    ``cut_filters`` (addendum B4, D5). ``level=off`` is load-bearing -- without
+    it ``alimiter`` re-normalises the result to full scale (addendum B3).
+    """
+
+    def test_default_settings_need_no_final_pass(self):
+        self.assertIsNone(ac.final_filters(cfg()),
+                          msg="with true_peak off there is no final pass")
+
+    def test_true_peak_off_is_none_even_with_a_dbtp_set(self):
+        self.assertIsNone(ac.final_filters(cfg(true_peak=False,
+                                               true_peak_dbtp=-3.0)))
+
+    def test_limiter_is_a_linear_ceiling_with_level_off(self):
+        self.assertEqual(ac.final_filters(cfg(true_peak=True)),
+                         "alimiter=limit=0.891251:level=off")
+
+    def test_limiter_honours_a_different_dbtp(self):
+        self.assertEqual(ac.final_filters(cfg(true_peak=True,
+                                              true_peak_dbtp=-3.0)),
+                         "alimiter=limit=0.707946:level=off")
+
+    def test_level_off_is_load_bearing(self):
+        self.assertIn("level=off", ac.final_filters(cfg(true_peak=True)))
+
+    def test_limiter_is_not_in_the_cut_chain(self):
+        # D5: the limiter must not be bolted onto cut_filters.
+        self.assertNotIn("alimiter", ac.cut_filters(cfg(true_peak=True), 5.0))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

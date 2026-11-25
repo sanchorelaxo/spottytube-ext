@@ -9,13 +9,17 @@ are unit-testable without spawning a process.
 
 The filter order is fixed and meaningful::
 
-    highpass -> dcshift -> silenceremove -> afade -> loudnorm -> aresample
+    highpass -> dcshift -> <NR> -> silenceremove -> afade -> loudnorm -> aresample
 
 * ``highpass`` removes sub-audible rumble first, so what follows — most
   visibly the ``silenceremove`` threshold — sees the high-passed signal. It
   does not touch the DC measurement: that probe runs on the raw source before
   the chain and never sees this filter.
 * ``dcshift`` removes any constant offset that survived.
+* ``<NR>`` (noise reduction) is optional and sits right after the DC shift and
+  before the silence trim, so the trim threshold sees a denoised signal. It is
+  off by default and adds no term; when on it is bare ``afftdn`` or
+  ``arnndn=model=<nr_model>`` (see :func:`_noise_reduction`).
 * ``silenceremove`` trims dead air at both ends; the tail is reached by
   reversing, trimming, and reversing back.
 * ``afade`` de-clicks the cut boundary last, so it always tapers real audio
@@ -56,7 +60,24 @@ a second one.
 is a real measured two-pass, so it needs the source's loudness (an extra ffmpeg
 pass reading the pass-1 JSON) before the chain can be built. ``"dynamic"``
 needs no probe.
+
+:func:`final_filters` is the one builder that runs *outside* the cut chain. It
+is applied by ``sample_tool.build_sample`` as its own pass, after
+``retime_segment`` returns, so the true-peak limiter protects the file the deck
+stores at every speed — including 1x, where ``retime_segment`` only copies the
+cut and spawns no ffmpeg at all. Bolt it onto the re-time pass and it would
+silently do nothing in the common case.
 """
+
+
+class NoiseModelMissing(ValueError):
+    """Raised when ``arnndn`` is selected without a model to run it on.
+
+    ``arnndn`` needs a ``.rnnn`` rnnoise model; with none configured the chain
+    cannot be built, so building refuses here rather than emitting a filter
+    that would fail deep inside ffmpeg. The check is on the setting alone — the
+    path itself is never opened (see :func:`_noise_reduction`).
+    """
 
 
 def needs_dc_probe(cfg):
@@ -138,6 +159,30 @@ def _dc_shift(cfg, dc_offset):
         # Remove the measured offset by shifting by its negative.
         return f"dcshift=shift={-float(dc_offset):g}"
     return None
+
+
+def _noise_reduction(cfg):
+    """The ``<NR>`` term, or ``None`` when noise reduction is off.
+
+    ``afftdn`` is ffmpeg's own FFT denoiser and ships bare — the spec names it
+    with no parameters, and it is the default method. ``arnndn`` is the rnnoise
+    model path and needs a model file, so a blank ``nr_model`` is refused here.
+
+    This is a pure string builder: the model path is emitted verbatim and never
+    stat'ed or opened, so a missing or unreadable file surfaces as an ffmpeg
+    error in the pass that runs it, not as a refusal to build the chain.
+    """
+    if not cfg["noise_reduction"]:
+        return None
+    if str(cfg.get("nr_method", "afftdn")) == "arnndn":
+        model = str(cfg.get("nr_model", "") or "").strip()
+        if not model:
+            raise NoiseModelMissing(
+                "noise reduction is set to arnndn but no rnnoise model is "
+                "configured — set the rnnoise model path, or use afftdn"
+            )
+        return f"arnndn=model={model}"
+    return "afftdn"
 
 
 def _fade_seconds(cfg):
@@ -224,6 +269,32 @@ def resample_filter(cfg):
     return "aresample=" + ":".join(options)
 
 
+def final_filters(cfg):
+    """The post-retime final-pass ``-af`` for ``cfg``, or ``None`` if none apply.
+
+    One term only: a true-peak limiter, run by ``sample_tool.build_sample`` as
+    its own ffmpeg pass *after* ``retime_segment``. It cannot live in the cut
+    chain: at 1x ``retime_segment`` copies the file and spawns no ffmpeg, so a
+    limiter bolted onto the re-time pass would silently do nothing in the
+    common case.
+
+    ``limit`` is the linear ceiling for ``true_peak_dbtp`` (``10 ** (dbtp /
+    20)``, rounded to 6 places). ``level=off`` is load-bearing: without it
+    ``alimiter`` auto-levels the result back up to full scale and the ceiling
+    is gone. Returns ``None`` (not ``""``) with ``true_peak`` off, which is the
+    default, so callers can test truthiness and the default build stays
+    byte-identical.
+
+    The limiter and ``loudnorm``'s own ``TP`` both cap the peak; if the two
+    disagree the tighter one wins, so set them to match (the README says so).
+    This builder does not reconcile them.
+    """
+    if not cfg["true_peak"]:
+        return None
+    linear = round(10 ** (float(cfg["true_peak_dbtp"]) / 20), 6)
+    return f"alimiter=limit={linear:g}:level=off"
+
+
 def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
                 measured=None):
     """The comma-joined cut-pass filters for ``cfg``, or ``""`` if none apply.
@@ -235,9 +306,10 @@ def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
     ``loudnorm``, ``loudnorm_i`` and ``measured`` are threaded straight to
     :func:`loudnorm_filter` (each ``None`` falls back to ``cfg``/off). The
     loudnorm term follows the fades, and :func:`resample_filter` closes the
-    chain, after loudnorm.
+    chain, after loudnorm. The noise-reduction term (:func:`_noise_reduction`)
+    sits after ``dcshift`` and before the silence trim.
     """
-    parts = [_highpass(cfg), _dc_shift(cfg, dc_offset)]
+    parts = [_highpass(cfg), _dc_shift(cfg, dc_offset), _noise_reduction(cfg)]
     trim = _silence_trim(cfg)
     if trim:
         # Trim the head, fade the head, then one reverse pair that trims the

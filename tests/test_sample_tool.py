@@ -12,8 +12,10 @@ Run: python3 -m unittest tests.test_sample_tool -v
 import contextlib
 import hashlib
 import importlib.util
+import json
 import math
 import os
+import random
 import shutil
 import struct
 import subprocess
@@ -1560,6 +1562,162 @@ class TestResampleAndDitherReal(unittest.TestCase):
             len(seen_default), len(seen_soxr),
             msg=f"the resampler must add no ffmpeg pass: default spawned "
                 f"{len(seen_default)}, soxr spawned {len(seen_soxr)}")
+
+
+class TestFinalLimiterReal(unittest.TestCase):
+    """The post-retime true-peak limiter, proven to bite at speed 1.0.
+
+    ``retime_segment`` spawns no ffmpeg at 1x (it copies the file), so a
+    limiter bolted onto the re-time pass would silently do nothing in the
+    common case. These tests drive :func:`build_sample` end to end and decode
+    the float PCM -- the number is measured, never read out of a string. A 0.99
+    source already sits above the 0.891251 ceiling, so no varispeed is needed
+    to make the test bite (addendum B3/B4).
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def hot_source(self, seconds=1.0, level=0.99, freq=220.0):
+        """A steady near-full-scale tone: above the limiter's ceiling on its own."""
+        def gen(i):
+            v = level * math.sin(2 * math.pi * freq * i / 48000.0)
+            return (v, v)
+        path = self.root / "hot.wav"
+        path.write_bytes(_float_wav(gen, seconds))
+        return path
+
+    @contextlib.contextmanager
+    def settings(self, **values):
+        """Point ``SPOTTYTUBE_SETTINGS`` at a file carrying these values."""
+        path = self.root / "settings.json"
+        path.write_text(json.dumps(values))
+        with mock.patch.dict(os.environ, {"SPOTTYTUBE_SETTINGS": str(path)}):
+            yield path
+
+    def build(self, src, speed, cache, **settings):
+        with self.settings(**settings):
+            return sample_tool.build_sample(
+                str(src), "0:00", "0:01", install=False, speed=speed,
+                cache_dir=str(self.root / cache))
+
+    def peak(self, path):
+        return max(abs(x) for x in _frames(path))
+
+    def test_true_peak_caps_a_hot_source_at_speed_1x(self):
+        # The trap that matters: at 1x the retime pass is a plain copy, so this
+        # only lands if the limiter is its own pass after retime_segment.
+        result = self.build(self.hot_source(), 1.0, "cap1x",
+                            true_peak=True, true_peak_dbtp=-1.0)
+        peak = self.peak(result.segment_path)
+        self.assertLessEqual(
+            peak, 10 ** (-1.0 / 20) + 1e-3,
+            msg=f"peak {peak:.6f} must sit at the -1 dBTP ceiling, not above it")
+        self.assertTrue(sample_tool.wb.is_valid(result.segment_path),
+                        msg="the limited sample must still be a valid WAV")
+
+    def test_without_true_peak_a_hot_source_stays_over_the_ceiling(self):
+        # The control: with the limiter off the very same source stays hot,
+        # which is what proves the pass above is doing the work.
+        result = self.build(self.hot_source(), 1.0, "cap1xoff")
+        peak = self.peak(result.segment_path)
+        self.assertGreater(peak, 0.95,
+                           msg=f"peak {peak:.6f} must stay above the ceiling")
+
+    def test_true_peak_caps_a_hot_source_at_speed_1_5x(self):
+        result = self.build(self.hot_source(), 1.5, "cap15x",
+                            true_peak=True, true_peak_dbtp=-1.0)
+        peak = self.peak(result.segment_path)
+        self.assertLessEqual(
+            peak, 10 ** (-1.0 / 20) + 1e-3,
+            msg=f"peak {peak:.6f} must sit at the -1 dBTP ceiling at 1.5x too")
+
+    def test_true_peak_adds_exactly_one_spawn_at_1x_and_1_5x(self):
+        # Counted from real spawns: the final pass is a single ffmpeg run.
+        for speed in (1.0, 1.5):
+            with _spy_passes() as base:
+                self.build(self.hot_source(), speed, f"base{speed}")
+            with _spy_passes() as limited:
+                self.build(self.hot_source(), speed, f"lim{speed}",
+                           true_peak=True, true_peak_dbtp=-1.0)
+            self.assertEqual(
+                len(limited), len(base) + 1,
+                msg=f"at {speed}x true_peak must add exactly one spawn: "
+                    f"default {len(base)}, true_peak {len(limited)}")
+
+    def test_default_build_spawns_no_limiter_pass(self):
+        with _spy_passes() as seen:
+            self.build(self.hot_source(), 1.0, "dflt")
+        self.assertEqual(
+            len(seen), 2,
+            msg=f"the default build is cut + re-header, nothing more: {seen!r}")
+        self.assertFalse(
+            any("-af" in cmd and "alimiter" in cmd[cmd.index("-af") + 1]
+                for cmd in seen),
+            msg=f"no alimiter may run at the defaults: {seen!r}")
+
+
+class TestNoiseReductionReal(unittest.TestCase):
+    """Noise reduction end to end: bare ``afftdn`` drops the -50 dBFS floor.
+
+    Fixture: 1 s of a 300 Hz tone at 0.3, then 1 s of noise at 0.003
+    (-50 dBFS, ffmpeg's default ``afftdn`` floor); the noise-only section's RMS
+    is the observable. A loud synthetic hiss would look broken with bare
+    ``afftdn`` (0.9% at -26 dBFS) -- the fixture is what makes the effect
+    real (addendum B5).
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def fixture(self, noise=0.003, seed=5):
+        rng = random.Random(seed)
+
+        def gen(i):
+            t = i / 48000.0
+            v = 0.3 * math.sin(2 * math.pi * 300 * t) if t < 1.0 else 0.0
+            return (v + noise * rng.uniform(-1, 1),) * 2
+        path = self.root / "nr.wav"
+        path.write_bytes(_float_wav(gen, 2.0))
+        return path
+
+    def tail_rms(self, path):
+        """RMS of the last 0.5 s: the noise-only section."""
+        return _rms(_frames(path)[72000:96000])
+
+    def test_afftdn_drops_the_noise_only_tail_rms(self):
+        src = self.fixture()
+        plain = self.root / "plain.wav"
+        denoised = self.root / "denoised.wav"
+        sample_tool.extract_segment(src, plain, 0.0, 2.0,
+                                    cfg=_cfg(edge_fade="off"))
+        sample_tool.extract_segment(src, denoised, 0.0, 2.0,
+                                    cfg=_cfg(edge_fade="off",
+                                             noise_reduction=True))
+        base = self.tail_rms(plain)
+        after = self.tail_rms(denoised)
+        drop = 1.0 - after / base
+        self.assertGreater(
+            drop, 0.5,
+            msg=f"noise-only RMS {base:.6f} -> {after:.6f} ({drop:.1%} lower); "
+                f"bare afftdn must bite this fixture")
+
+    def test_arnndn_model_path_that_does_not_exist_fails_loud(self):
+        # A bad model path must surface as an error, never a silent pass.
+        src = self.fixture()
+        dst = self.root / "arnndn.wav"
+        with self.assertRaises(RuntimeError) as caught:
+            sample_tool.extract_segment(
+                src, dst, 0.0, 0.5,
+                cfg=_cfg(edge_fade="off", noise_reduction=True,
+                         nr_method="arnndn",
+                         nr_model="/nonexistent/nope.rnnn"))
+        self.assertIn("model", str(caught.exception).lower(),
+                      msg=f"error was {caught.exception!r}")
+        self.assertFalse(dst.exists(),
+                         msg="a failed cut must not leave a half-written sample")
 
 
 if __name__ == "__main__":

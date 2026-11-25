@@ -911,6 +911,42 @@ def retime_segment(src, dst, speed, method="atempo"):
     return dst
 
 
+def apply_final_filters(path, cfg):
+    """Run the advanced chain's final pass over ``path``, in place.
+
+    The last pass, applied *after* :func:`retime_segment`, so the true-peak
+    limiter protects the file the deck actually stores at every speed —
+    including 1x, where :func:`retime_segment` only copies the cut and spawns
+    no ffmpeg at all. Returns ``path``.
+
+    A no-op (and no process) when :func:`audio_chain.final_filters` is ``None``,
+    which is the default, so the default build gains nothing. Otherwise it is a
+    single ffmpeg spawn: ffmpeg filters and strips the container to raw float
+    on stdout and the plain Spotykach header is written here through the
+    vendor writer, so the pass costs one ffmpeg process rather than the two a
+    cut/re-time pass spends.
+    """
+    filters = ac.final_filters(cfg)
+    if not filters:
+        return path
+    path = Path(path)
+    cmd = [
+        wb.ffmpeg(), "-y", "-loglevel", "error",
+        "-i", str(path),
+        "-af", filters,
+        "-f", "f32le", "-c:a", wb.PCM_FMT,
+        "-ar", str(wb.SAMPLE_RATE), "-ac", str(wb.CHANNELS),
+        "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed: {result.stderr.decode(errors='replace').strip()}"
+        )
+    wb._write_plain_float_wav(path, result.stdout, wb.SAMPLE_RATE, wb.CHANNELS)
+    return path
+
+
 # --- status --------------------------------------------------------------
 
 
@@ -1107,6 +1143,7 @@ def build_sample(url, start, end, card=None, cache_dir=None,
         extract_segment(media, cut, start_s, duration,
                         loudnorm=loudnorm, loudnorm_i=loudnorm_i, cfg=cfg)
         retime_segment(cut, segment, speed, method=speed_method)
+        apply_final_filters(segment, cfg)
     finally:
         cut.unlink(missing_ok=True)
 

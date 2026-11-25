@@ -136,6 +136,95 @@ down does not buy a longer selection — at 0.5x only 21 s of source fits in
 and re-timed at 1.5x when it is built. The widget, the bridge and the tool all
 refuse a range whose stored length is over 42 s.
 
+## Advanced audio settings
+
+The settings panel groups the pipeline controls under a collapsed
+**Advanced** heading (the gear panel, `tools/settings.py`). Everything there
+is off or neutral by default, so a build with the defaults is the single-cut
+build this tool has always made — byte for byte. One line per setting, its
+default, and what it costs:
+
+**Edge fades** — always on:
+
+- `edge_fade` (`declick`) — a short fade at each edge of the cut so the loop
+  does not click where it joins. `off` is the only other value.
+- `edge_fade_ms` (`5`) — fade length in milliseconds. The fade pair is
+  symmetric and equal length.
+
+**True-peak limiter** — off by default, costs **one extra ffmpeg pass**:
+
+- `true_peak` (`off`) — when on, a final `alimiter` pass caps the sample's
+  peak. It runs as its **own pass after the cut is re-timed**, not inside the
+  cut, so it protects the stored file at every speed — including 1x, where the
+  re-time step is a plain copy and no ffmpeg runs at all. With it off the
+  default build spawns nothing extra.
+- `true_peak_dbtp` (`-1.0`) — the ceiling in dBTP; the limiter `limit` is its
+  linear form (`10 ** (dbtp / 20)`). The filter uses `level=off` so the result
+  is **only ever attenuated** to the ceiling — without `level=off` `alimiter`
+  auto-levels back up to full scale and the ceiling is lost.
+- **Match `loudnorm_tp` and `true_peak_dbtp`.** Loudnorm drives toward its own
+  `TP` (default `-1.5`); the limiter caps at `true_peak_dbtp` (default `-1.0`).
+  Two ceilings both apply and the tighter one wins, so a limiter set *looser*
+  than `loudnorm_tp` cannot undo loudnorm — but a limiter set *tighter* will
+  re-limit loudnorm's output. Set them to the same number and stop thinking
+  about it; nothing reconciles them for you.
+
+**Seek** — no extra pass either way:
+
+- `cut_seek` (`fast`) — `fast` seeks by keyframe index and `accurate` decodes
+  to the exact frame. Accurate is slower but lands on the precise sample.
+
+**Loudness normalisation** — off by default; `linear` costs **one extra probe pass**:
+
+- `loudnorm_mode` (`dynamic`) — `dynamic` applies `loudnorm` in one pass while
+  it measures and adjusts as it goes. `linear` measures the source first (an
+  extra ffmpeg pass reading the pass-1 JSON), then applies a fixed gain — no
+  pumping, but a second pass.
+- `loudnorm_tp` (`-1.5`) — the true-peak ceiling loudnorm targets.
+- `loudnorm_lra` (`11`) — the loudness-range target, in LU.
+
+**High-pass** — off by default, no extra pass:
+
+- `highpass` (`off`) — a leading high-pass that removes sub-audible rumble
+  before anything else in the chain.
+- `highpass_hz` (`30`) — the corner frequency.
+
+**DC offset** — off by default; costs **one probe pass** when on:
+
+- `dc_shift` (`off`) — measures the source's DC offset (an extra ffmpeg
+  `astats` pass) and shifts it out. Off leaves the cut single-pass.
+
+**Resample / dither** — no extra pass, ever:
+
+- `resampler` (`swr`) — `swr` (ffmpeg's built-in) or `soxr`. Only matters when
+  the source is not already 48 kHz; the output is **always 48 kHz stereo**.
+- `dither` (`none`) — dither added at the resample. The tool writes **float32**
+  WAVs, and dither is inert on float output: it is a no-op you will not hear on
+  the shipped files. Leave it at `none`; it exists for completeness.
+
+**Silence trim** — off by default, no extra pass:
+
+- `trim_silence` (`off`) — trims leading and trailing near-silence.
+- `trim_threshold_db` (`-50`) — what counts as silence for the trim.
+
+**Noise reduction** — off by default, no extra pass:
+
+- `noise_reduction` (`off`) — a denoiser that runs after the DC shift and
+  before the silence trim.
+- `nr_method` (`afftdn`) — `afftdn` is ffmpeg's own FFT denoiser and is used
+  with no parameters. `arnndn` is the rnnoise method and **needs a model
+  file**.
+- `nr_model` (`""`) — the `.rnnn` rnnoise model for `arnndn`. It is required
+  whenever `nr_method` is `arnndn`: with it blank the build refuses up front
+  with a clear error, and a path that does not load fails loudly inside ffmpeg
+  (a non-zero exit surfaced as an error) rather than passing the audio through
+  untouched. The tool never downloads a model for you.
+
+The chain order is fixed: `highpass → dcshift → <noise reduction> →
+silenceremove → afade → loudnorm → aresample`, and the true-peak limiter runs
+afterwards as its own final pass. Each setting that needs a pass costs wall
+time proportional to the sample, so a default build stays the quick one.
+
 ## Slot order
 
 Tapes play in device order B G P R T Y, six slots each, files always named
