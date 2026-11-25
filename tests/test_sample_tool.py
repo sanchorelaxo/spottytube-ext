@@ -10,6 +10,7 @@ Run: python3 -m unittest tests.test_sample_tool -v
 """
 
 import importlib.util
+import math
 import os
 import shutil
 import struct
@@ -732,6 +733,198 @@ class TestTransferDrop(CardFixture):
                     "usb", self.root, "B", wav(9), self.root / "archive")
 
         self.assertEqual(len(seen), 1)
+
+
+# --- Task 2: the cut-pass chain against the real ffmpeg --------------------
+
+
+def _cfg(**over):
+    """A full settings dict (as settings.load returns) with overrides."""
+    base = sample_tool.st_settings.defaults()
+    base.update(over)
+    return base
+
+
+def _float_wav(generator, seconds, rate=48000, channels=2):
+    """A real float WAV built sample by sample from ``generator(i)->(l, r)``."""
+    frames = int(seconds * rate)
+    body = bytearray()
+    for i in range(frames):
+        left, right = generator(i)
+        body += struct.pack("<ff", left, right)
+    header = (b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt "
+              + struct.pack("<IHHIIHH", 16, 3, channels, rate,
+                            rate * channels * 4, channels * 4, 32)
+              + b"data" + struct.pack("<I", len(body)))
+    return header + bytes(body)
+
+
+def _frames(path, channel=0):
+    """Decoded float32 samples of one channel of a plain Spotykach WAV."""
+    data = Path(path).read_bytes()[44:]
+    start = channel * 4
+    return [struct.unpack_from("<f", data, o)[0]
+            for o in range(start, len(data), 8)]
+
+
+def _rms(samples):
+    return math.sqrt(sum(x * x for x in samples) / len(samples))
+
+
+class TestCutPassChain(unittest.TestCase):
+    """extract_segment with a cfg: the advanced filters applied for real.
+
+    Every test writes a real WAV, runs the real ffmpeg resolved by wb.ffmpeg(),
+    and asserts on decoded samples -- no mocked command line.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def source(self, seconds=1.0, loud_from=0.2, loud_to=0.8, level=0.5):
+        """Leading/trailing silence around a steady block of ``level``."""
+        def gen(i):
+            t = i / 48000.0
+            v = level if loud_from <= t < loud_to else 0.0
+            return (v, v)
+        path = self.root / "source.wav"
+        path.write_bytes(_float_wav(gen, seconds))
+        return path
+
+    def cut(self, src, cfg, start, seconds, name="out.wav"):
+        dst = self.root / name
+        sample_tool.extract_segment(src, dst, start, seconds, cfg=cfg)
+        return dst
+
+    def test_declick_taper_ramps_in_and_out(self):
+        src = self.source()                      # loud 0.2..0.8 at 0.5
+        dst = self.cut(src, _cfg(edge_fade="declick", edge_fade_ms=50),
+                       0.3, 0.4)
+        samples = _frames(dst)
+        self.assertAlmostEqual(len(samples) / 48000.0, 0.4, delta=0.02)
+        first = samples[0]
+        ramp_25ms = samples[int(0.025 * 48000)]
+        ramp_49ms = samples[int(0.049 * 48000)]
+        middle = samples[int(0.2 * 48000)]
+        last = samples[-1]
+        self.assertLess(abs(first), 0.05)                # starts at silence
+        self.assertLess(abs(first), abs(ramp_25ms))      # ramps up ...
+        self.assertLess(abs(ramp_25ms), abs(ramp_49ms))
+        self.assertLess(abs(ramp_49ms), abs(middle))     # ... to full level
+        self.assertGreater(abs(middle), 0.4)
+        self.assertLess(abs(last), 0.05)                 # ends at silence
+
+    def test_no_fade_first_frame_matches_the_source(self):
+        src = self.source()
+        samples_in = _frames(src)
+        dst = self.cut(src, _cfg(edge_fade="off"), 0.3, 0.4, name="raw.wav")
+        out = _frames(dst)
+        self.assertAlmostEqual(out[0], samples_in[int(0.3 * 48000)], places=4)
+        self.assertAlmostEqual(out[-1], samples_in[int(0.7 * 48000) - 1],
+                               places=4)
+
+    def test_default_chain_matches_the_legacy_cut_byte_for_byte(self):
+        # Every new setting at its default except the intentional default-on
+        # declick turned off: the output must equal the cfg=None legacy cut.
+        src = self.source()
+        legacy = self.root / "legacy.wav"
+        sample_tool.extract_segment(src, legacy, 0.2, 0.4)
+        modern = self.cut(src, _cfg(edge_fade="off"), 0.2, 0.4,
+                          name="modern.wav")
+        self.assertEqual(legacy.read_bytes(), modern.read_bytes())
+
+    def test_highpass_drops_a_low_rumble_tone(self):
+        def gen(i):
+            t = i / 48000.0
+            v = (0.4 * math.sin(2 * math.pi * 400 * t)
+                 + 0.4 * math.sin(2 * math.pi * 20 * t))
+            return (v, v)
+        src = self.root / "rumble.wav"
+        src.write_bytes(_float_wav(gen, 1.0))
+        plain = _frames(self.cut(
+            src, _cfg(edge_fade="off", highpass=False), 0.2, 0.6,
+            name="plain.wav"))
+        filtered = _frames(self.cut(
+            src, _cfg(edge_fade="off", highpass=True, highpass_hz=30), 0.2,
+            0.6, name="hp.wav"))
+        self.assertLess(_rms(filtered), _rms(plain))
+
+    def test_dc_probe_then_shift_cancels_the_offset(self):
+        def gen(i):
+            t = i / 48000.0
+            v = 0.5 * math.sin(2 * math.pi * 440 * t) + 0.1
+            return (v, v)
+        src = self.root / "dc.wav"
+        src.write_bytes(_float_wav(gen, 1.0))
+        in_mean = sum(_frames(src)) / 48000.0
+        self.assertGreater(in_mean, 0.05)                # the source has DC
+        dst = self.cut(src, _cfg(edge_fade="off", dc_shift=True), 0.0, 1.0,
+                       name="dcout.wav")
+        out = _frames(dst)
+        out_mean = sum(out) / len(out)
+        self.assertLess(abs(out_mean), 0.02)             # and it is gone
+
+    def test_trim_does_not_trip_the_short_segment_guard(self):
+        def gen(i):
+            t = i / 48000.0
+            v = 0.5 if t >= 0.4 else 0.0
+            return (v, v)
+        src = self.root / "lead.wav"
+        src.write_bytes(_float_wav(gen, 1.0))
+        dst = self.root / "trimmed.wav"
+        sample_tool.extract_segment(
+            src, dst, 0.0, 1.0,
+            cfg=_cfg(edge_fade="off", trim_silence=True, trim_threshold_db=-50))
+        got = wav_seconds(dst)
+        self.assertGreater(got, 0.3)     # not empty
+        self.assertLess(got, 0.75)       # genuinely shorter than the request
+
+    def test_start_past_the_end_still_raises_with_trim_on(self):
+        src = self.source(seconds=1.0)
+        dst = self.root / "past.wav"
+        with self.assertRaises(RuntimeError) as caught:
+            sample_tool.extract_segment(
+                src, dst, 30.0, 1.0,
+                cfg=_cfg(trim_silence=True, trim_threshold_db=-50))
+        self.assertIn("shorter than the requested range",
+                      str(caught.exception))
+        self.assertFalse(dst.exists())
+
+    def test_start_past_the_end_still_raises_with_trim_off(self):
+        src = self.source(seconds=1.0)
+        dst = self.root / "past2.wav"
+        with self.assertRaises(RuntimeError):
+            sample_tool.extract_segment(src, dst, 30.0, 1.0,
+                                        cfg=_cfg(edge_fade="off"))
+
+    def test_default_path_spawns_one_pass_and_dc_adds_the_probe(self):
+        src = self.source()
+        real = sample_tool.subprocess
+
+        class Spy:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, cmd, *args, **kwargs):
+                self.calls.append(cmd)
+                return real.run(cmd, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        defaults = Spy()
+        with mock.patch.object(sample_tool, "subprocess", defaults):
+            sample_tool.extract_segment(src, self.root / "d.wav", 0.0, 0.5,
+                                        cfg=_cfg())
+        self.assertEqual(len(defaults.calls), 1)         # one cut, no probe
+
+        probed = Spy()
+        with mock.patch.object(sample_tool, "subprocess", probed):
+            sample_tool.extract_segment(src, self.root / "p.wav", 0.0, 0.5,
+                                        cfg=_cfg(dc_shift=True))
+        self.assertEqual(len(probed.calls), 2)           # probe + cut
+        self.assertTrue(any("astats" in cmd for cmd in probed.calls))
 
 
 if __name__ == "__main__":

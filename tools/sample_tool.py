@@ -66,6 +66,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import audio_chain as ac  # noqa: E402
 import sk_install  # noqa: E402
 import settings as st_settings  # noqa: E402
 import wav_builder as wb  # noqa: E402
@@ -587,7 +588,48 @@ def wav_seconds(path):
     return frames / wb.SAMPLE_RATE
 
 
-def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0):
+def _overall_dc_offset(stderr):
+    """Pull the mean DC offset out of ffmpeg ``astats`` stderr.
+
+    The value lives in the ``Overall`` block, labelled exactly
+    ``DC offset: <float>``. Returns 0.0 when the block or line is missing, so a
+    failed parse leaves the DC shift off rather than corrupting the cut.
+    """
+    lines = stderr.splitlines()
+    overall = -1
+    for i, line in enumerate(lines):
+        if line.rstrip().endswith("Overall"):
+            overall = i
+    if overall < 0:
+        return 0.0
+    for line in lines[overall + 1:]:
+        if "DC offset:" in line:
+            try:
+                return float(line.split("DC offset:", 1)[1].strip())
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
+def _probe_dc_offset(src, start, seconds):
+    """Measure the source's mean DC offset over the cut range (one pass).
+
+    Spawned only when :func:`audio_chain.needs_dc_probe` is true, so the
+    default path never grows a second ffmpeg pass.
+    """
+    cmd = [
+        wb.ffmpeg(), "-hide_banner",
+        "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
+        "-i", str(src), "-af", "astats", "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return 0.0
+    return _overall_dc_offset(result.stderr)
+
+
+def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0,
+                    cfg=None):
     """Cut ``[start, start+seconds)`` and write a native Spotykach WAV.
 
     No speed is applied here: this is the plain slice, an intermediate. The
@@ -597,6 +639,13 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0):
     ``loudnorm`` runs ffmpeg's EBU R128 filter over the cut so every sample
     lands at the same perceived loudness; ``loudnorm_i`` is the target in
     LUFS (TP -1.5, LRA 11 are the customary companions).
+
+    ``cfg`` is a full settings dict (as :func:`settings.load` returns). When it
+    is given, the advanced cut-pass filters — high-pass, DC shift, silence trim
+    and the edge de-click — are prepended to the ``-af`` chain via
+    :func:`audio_chain.cut_filters`. When it is ``None`` the behaviour is
+    exactly as before, which is what keeps the default path byte-for-byte
+    identical.
 
     Enforces the absolute envelope here as well: :data:`RAW_CUT_CEILING` is
     the longest range any player speed can still fit on the deck (42 s at the
@@ -616,8 +665,18 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0):
         "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
         "-i", str(src),
     ]
+    af_parts = []
+    if cfg is not None:
+        dc_offset = 0.0
+        if ac.needs_dc_probe(cfg):
+            dc_offset = _probe_dc_offset(src, start, seconds)
+        chain = ac.cut_filters(cfg, seconds, dc_offset)
+        if chain:
+            af_parts.append(chain)
     if loudnorm:
-        cmd += ["-af", f"loudnorm=I={float(loudnorm_i):g}:TP=-1.5:LRA=11"]
+        af_parts.append(f"loudnorm=I={float(loudnorm_i):g}:TP=-1.5:LRA=11")
+    if af_parts:
+        cmd += ["-af", ",".join(af_parts)]
     cmd += [
         "-c:a", wb.PCM_FMT, "-ar", str(wb.SAMPLE_RATE), "-ac", str(wb.CHANNELS),
         str(rough),
@@ -634,9 +693,15 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0):
         rough.unlink(missing_ok=True)
 
     # A start time past the end of the source makes ffmpeg write a header with
-    # no samples. That loads on the Spotykach as silence, so refuse it.
+    # no samples. That loads on the Spotykach as silence, so refuse it. With
+    # silence trim on, a shorter-than-requested segment is the whole point, so
+    # only a genuinely empty file (no audio at all) is refused.
     got = wav_seconds(dst)
-    if got < seconds - max(0.25, seconds * 0.01):
+    if cfg is not None and cfg.get("trim_silence"):
+        too_short = got <= 0.0
+    else:
+        too_short = got < seconds - max(0.25, seconds * 0.01)
+    if too_short:
         dst.unlink(missing_ok=True)
         raise RuntimeError(
             f"source is shorter than the requested range: asked for "
@@ -927,7 +992,7 @@ def build_sample(url, start, end, card=None, cache_dir=None,
     cut = segment.with_name(segment.stem + ".cut.WAV")
     try:
         extract_segment(media, cut, start_s, duration,
-                        loudnorm=loudnorm, loudnorm_i=loudnorm_i)
+                        loudnorm=loudnorm, loudnorm_i=loudnorm_i, cfg=cfg)
         retime_segment(cut, segment, speed, method=speed_method)
     finally:
         cut.unlink(missing_ok=True)
