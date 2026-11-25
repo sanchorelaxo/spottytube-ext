@@ -621,27 +621,37 @@ def _overall_dc_offset(stderr):
     )
 
 
-def _source_seek_args(src, start, seconds):
+def _source_seek_args(src, start, seconds, seek="fast"):
     """The shared ``-ss``/``-t``/``-i`` argv for a ranged ffmpeg read.
 
-    Input seeking (``-ss`` *before* ``-i``) is what makes the cut exact and
-    fast. The DC probe, the loudnorm measurement and the cut pass must build
-    this identically or they drift, so it lives in one place.
+    ``seek="fast"`` (the default) puts the range *before* ``-i``: ffmpeg seeks
+    to the nearest keyframe and decodes forward, which is quick on a long
+    source. ``seek="accurate"`` puts the input first and the range after it, so
+    ffmpeg decodes from the file start and honours the in-point exactly on a
+    long/compressed source. Both range flags move together: ``-t`` before
+    ``-i`` would cap how much is read, and an output ``-ss`` would then drop a
+    further slice, yielding a cut one range short. Any value other than
+    ``"accurate"`` reads as fast. The DC probe, the loudnorm measurement and
+    the cut pass build this identically or they drift, so it lives in one
+    place.
     """
+    if seek == "accurate":
+        return ["-i", str(src), "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}"]
     return ["-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", str(src)]
 
 
-def _probe_dc_offset(src, start, seconds):
+def _probe_dc_offset(src, start, seconds, seek="fast"):
     """Measure the source's mean DC offset over the cut range (one pass).
 
     Spawned only when :func:`audio_chain.needs_dc_probe` is true, so the
     default path never grows a second ffmpeg pass. A failed probe raises
     :class:`RuntimeError` naming ``dc_shift`` rather than returning 0.0, which
-    would silently leave the shift off.
+    would silently leave the shift off. ``seek`` is threaded through so the
+    probe reads the same range the cut will.
     """
     cmd = [
         wb.ffmpeg(), "-hide_banner",
-        *_source_seek_args(src, start, seconds),
+        *_source_seek_args(src, start, seconds, seek),
         "-af", "astats", "-f", "null", "-",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -685,7 +695,8 @@ def _parse_loudnorm_json(stderr):
         ) from None
 
 
-def _probe_loudnorm(src, start, seconds, cfg, loudnorm_i, dc_offset=0.0):
+def _probe_loudnorm(src, start, seconds, cfg, loudnorm_i, dc_offset=0.0,
+                    seek="fast"):
     """Measure the source's loudness over the cut range (one pass, linear mode).
 
     Spawned only when :func:`audio_chain.needs_loudnorm_probe` is true. The
@@ -693,7 +704,8 @@ def _probe_loudnorm(src, start, seconds, cfg, loudnorm_i, dc_offset=0.0):
     ``loudnorm`` term itself, so the reading matches the audio about to be
     corrected (a DC shift or silence trim would shift it otherwise). The
     measurement's target must equal the correction's target: ``target_offset``
-    depends on it. A failed pass raises :class:`RuntimeError` naming
+    depends on it. ``seek`` is threaded through so the measurement reads the
+    same range the cut will. A failed pass raises :class:`RuntimeError` naming
     ``loudnorm``.
     """
     chain = ac.cut_filters(cfg, seconds, dc_offset, loudnorm=False)
@@ -701,7 +713,7 @@ def _probe_loudnorm(src, start, seconds, cfg, loudnorm_i, dc_offset=0.0):
                + ":print_format=json")
     cmd = [
         wb.ffmpeg(), "-hide_banner",
-        *_source_seek_args(src, start, seconds),
+        *_source_seek_args(src, start, seconds, seek),
         "-af", f"{chain},{measure}" if chain else measure,
         "-f", "null", "-",
     ]
@@ -751,19 +763,23 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0,
     dst.parent.mkdir(parents=True, exist_ok=True)
     rough = dst.with_name(dst.stem + ".cut.wav")
 
+    # The cut_seek mode is read once and threaded through all three passes, so
+    # the DC probe, the loudnorm measurement and the cut decode the same range.
+    seek = "accurate" if ac.accurate_seek(cfg) else "fast"
+
     cmd = [
         wb.ffmpeg(), "-y", "-loglevel", "error",
-        *_source_seek_args(src, start, seconds),
+        *_source_seek_args(src, start, seconds, seek),
     ]
     af_parts = []
     if cfg is not None:
         dc_offset = 0.0
         if ac.needs_dc_probe(cfg):
-            dc_offset = _probe_dc_offset(src, start, seconds)
+            dc_offset = _probe_dc_offset(src, start, seconds, seek)
         measured = None
         if ac.needs_loudnorm_probe(cfg, loudnorm):
             measured = _probe_loudnorm(src, start, seconds, cfg, loudnorm_i,
-                                       dc_offset)
+                                       dc_offset, seek)
         chain = ac.cut_filters(cfg, seconds, dc_offset, loudnorm=loudnorm,
                                loudnorm_i=loudnorm_i, measured=measured)
         if chain:

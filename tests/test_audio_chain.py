@@ -195,6 +195,14 @@ class TestLoudnorm(unittest.TestCase):
             False,
             msg="loudnorm off must never probe even in linear mode")
 
+    def test_needs_loudnorm_probe_tolerates_a_cfg_without_the_mode_key(self):
+        # M4: a cfg that omits loudnorm_mode must not KeyError; it reads as
+        # the dynamic default, matching the sibling needs_* helpers.
+        self.assertIs(
+            ac.needs_loudnorm_probe({"loudnorm": True}, loudnorm=True),
+            False,
+            msg="a cfg with no loudnorm_mode must read as dynamic, not raise")
+
     def test_loudnorm_term_sits_after_the_fades(self):
         # R2 ordering: highpass -> ... -> afade -> loudnorm.
         chain = ac.cut_filters(cfg(loudnorm=True, edge_fade="declick"), 10.0)
@@ -214,6 +222,28 @@ class TestLoudnorm(unittest.TestCase):
             loudnorm=True, measured=self.MEASURED)
         self.assertIn("linear=true", chain, msg=f"chain was {chain!r}")
         self.assertIn("measured_I=-2.97", chain, msg=f"chain was {chain!r}")
+
+
+class TestAccurateSeek(unittest.TestCase):
+    """``accurate_seek(cfg)``: the predicate behind the ``cut_seek`` mode."""
+
+    def test_fast_is_the_default(self):
+        self.assertIs(ac.accurate_seek(cfg()), False,
+                      msg="the default cut_seek is fast")
+
+    def test_accurate_reads_true(self):
+        self.assertIs(ac.accurate_seek(cfg(cut_seek="accurate")), True,
+                      msg="cut_seek=accurate must read as true")
+
+    def test_unknown_value_falls_back_to_fast(self):
+        self.assertIs(ac.accurate_seek(cfg(cut_seek="bogus")), False,
+                      msg="an unknown cut_seek must fall back to fast")
+
+    def test_missing_key_and_none_cfg_are_fast(self):
+        self.assertIs(ac.accurate_seek({}), False,
+                      msg="a cfg with no cut_seek must read as fast")
+        self.assertIs(ac.accurate_seek(None), False,
+                      msg="cfg=None must read as fast")
 
 
 if __name__ == "__main__":

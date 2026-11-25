@@ -66,7 +66,21 @@ def needs_loudnorm_probe(cfg, loudnorm=None):
     """
     if loudnorm is None:
         loudnorm = cfg["loudnorm"]
-    return bool(loudnorm) and str(cfg["loudnorm_mode"]) == "linear"
+    return bool(loudnorm) and str(cfg.get("loudnorm_mode", "dynamic")) == "linear"
+
+
+def accurate_seek(cfg):
+    """True when the cut should decode-then-seek (``cut_seek == "accurate"``).
+
+    ``fast`` (the default) keeps ``-ss`` before ``-i``, which jumps to the
+    nearest keyframe; ``accurate`` moves the range after ``-i`` so ffmpeg
+    decodes from the file start and honours the in-point exactly on a
+    long/compressed source. Any unknown or missing value reads as ``fast``, so
+    a cfg without the key — or ``cfg=None`` — stays today's behaviour.
+    """
+    if not cfg:
+        return False
+    return str(cfg.get("cut_seek", "fast")) == "accurate"
 
 
 def loudnorm_filter(cfg, loudnorm=None, loudnorm_i=None, measured=None):
@@ -163,7 +177,7 @@ def _silence_trim(cfg):
 
 def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
                 measured=None):
-    """The comma-joined cut-pass filters for ``cfg``, or ``\"\"`` if none apply.
+    """The comma-joined cut-pass filters for ``cfg``, or ``""`` if none apply.
 
     ``seconds`` is the length of the cut — with the trim off the fade-out start
     is measured back from its end. ``dc_offset`` is the measured DC offset of

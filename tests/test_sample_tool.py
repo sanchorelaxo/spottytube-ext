@@ -1208,5 +1208,226 @@ class TestLoudnormCompletion(unittest.TestCase):
                          msg=f"measurement must not silence itself: {measure[0]!r}")
 
 
+# --- Task 3b: honour the cut_seek mode (fast vs accurate) ------------------
+
+
+class TestSourceSeekArgs(unittest.TestCase):
+    """The shared ``-ss``/``-t``/``-i`` argv, in both seek modes."""
+
+    def test_default_is_todays_input_seeking_string(self):
+        got = sample_tool._source_seek_args("s.wav", 1.5, 3.0)
+        self.assertEqual(got, ["-ss", "1.500", "-t", "3.000", "-i", "s.wav"],
+                         msg=f"the default argv changed: {got!r}")
+
+    def test_fast_is_byte_identical_to_the_default(self):
+        explicit = sample_tool._source_seek_args("s.wav", 1.5, 3.0, seek="fast")
+        default = sample_tool._source_seek_args("s.wav", 1.5, 3.0)
+        self.assertEqual(explicit, default,
+                         msg=f"fast {explicit!r} != default {default!r}")
+
+    def test_accurate_puts_the_input_first_and_the_range_after(self):
+        got = sample_tool._source_seek_args("s.wav", 1.5, 3.0, seek="accurate")
+        self.assertEqual(got, ["-i", "s.wav", "-ss", "1.500", "-t", "3.000"],
+                         msg=f"accurate argv was {got!r}")
+        self.assertLess(got.index("-i"), got.index("-ss"),
+                        msg=f"accurate must decode from the start: {got!r}")
+        self.assertLess(got.index("-ss"), got.index("-t"),
+                        msg=f"-ss and -t must move together: {got!r}")
+
+    def test_unknown_seek_mode_falls_back_to_fast(self):
+        got = sample_tool._source_seek_args("s.wav", 1.5, 3.0, seek="bogus")
+        self.assertEqual(got, sample_tool._source_seek_args("s.wav", 1.5, 3.0),
+                         msg=f"an unknown seek mode must read as fast: {got!r}")
+
+
+class TestCutSeekMode(unittest.TestCase):
+    """``cut_seek`` on the real cut: argv shape and the emitted samples."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.src = self.source()
+
+    def source(self, seconds=1.0):
+        def gen(i):
+            t = i / 48000.0
+            v = 0.5 * math.sin(2 * math.pi * 220 * t)
+            return (v, v)
+        path = self.root / "src.wav"
+        path.write_bytes(_float_wav(gen, seconds))
+        return path
+
+    def capture(self, cfg, name="out.wav", loudnorm=False):
+        """Every argv :func:`extract_segment` spawned, in order."""
+        real = sample_tool.subprocess
+        seen = []
+
+        class Spy:
+            def run(self, cmd, *args, **kwargs):
+                seen.append(cmd)
+                return real.run(cmd, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        with mock.patch.object(sample_tool, "subprocess", Spy()), \
+             mock.patch.object(sample_tool.wb, "subprocess", Spy()):
+            sample_tool.extract_segment(self.src, self.root / name, 0.3, 0.4,
+                                        loudnorm=loudnorm, cfg=cfg)
+        return seen
+
+    @staticmethod
+    def cut_pass(seen):
+        # The cut is the pass that writes the WAV: it carries -c:a.
+        return [cmd for cmd in seen if "-c:a" in cmd][0]
+
+    def test_fast_cut_keeps_the_range_before_the_input(self):
+        cmd = self.cut_pass(
+            self.capture(_cfg(edge_fade="off", cut_seek="fast")))
+        i = cmd.index("-i")
+        self.assertEqual(cmd[i - 4:i + 2],
+                         ["-ss", "0.300", "-t", "0.400", "-i", str(self.src)],
+                         msg=f"fast cut must input-seek: {cmd!r}")
+
+    def test_missing_cut_seek_key_and_none_cfg_stay_fast(self):
+        cfg = _cfg(edge_fade="off")
+        del cfg["cut_seek"]
+        for label, cfg_in in (("cfg missing cut_seek", cfg), ("cfg=None", None)):
+            cmd = self.cut_pass(self.capture(cfg_in, name=f"{label}.wav"))
+            i = cmd.index("-i")
+            self.assertEqual(
+                cmd[i - 4:i + 2],
+                ["-ss", "0.300", "-t", "0.400", "-i", str(self.src)],
+                msg=f"{label} must stay byte-identical to fast: {cmd!r}")
+
+    def test_accurate_cut_moves_the_range_after_the_input(self):
+        cmd = self.cut_pass(
+            self.capture(_cfg(edge_fade="off", cut_seek="accurate")))
+        i = cmd.index("-i")
+        self.assertEqual(
+            cmd[i:i + 6],
+            ["-i", str(self.src), "-ss", "0.300", "-t", "0.400"],
+            msg=f"accurate cut must decode-then-seek: {cmd!r}")
+
+    def test_all_three_passes_share_the_accurate_seek_shape(self):
+        cfg = _cfg(loudnorm=True, loudnorm_mode="linear", dc_shift=True,
+                   cut_seek="accurate")
+        seen = self.capture(cfg, loudnorm=True)
+        dc = [cmd for cmd in seen if "astats" in cmd][0]
+        measure = [cmd for cmd in seen
+                   if "print_format=json" in " ".join(cmd)][0]
+        cut = self.cut_pass(seen)
+        for label, cmd in (("DC probe", dc), ("loudnorm measurement", measure),
+                           ("cut", cut)):
+            self.assertLess(
+                cmd.index("-i"), cmd.index("-ss"),
+                msg=f"{label} must seek after -i in accurate mode: {cmd!r}")
+
+    def test_accurate_and_fast_emit_the_same_samples(self):
+        # A correctness fence, not a difference test: on a WAV fixture the two
+        # modes must cut the identical range.
+        fast = self.root / "fast.wav"
+        sample_tool.extract_segment(self.src, fast, 0.3, 0.4,
+                                    cfg=_cfg(edge_fade="off", cut_seek="fast"))
+        acc = self.root / "acc.wav"
+        sample_tool.extract_segment(self.src, acc, 0.3, 0.4,
+                                    cfg=_cfg(edge_fade="off", cut_seek="accurate"))
+        f, a = _frames(fast), _frames(acc)
+        self.assertEqual(
+            len(f), len(a),
+            msg=f"fast cut {len(f)} frames, accurate cut {len(a)} frames")
+        first = (f[0], a[0]) if f and a else (float("nan"), float("nan"))
+        drift = max((abs(x - y) for x, y in zip(f, a)), default=0.0)
+        self.assertLess(
+            drift, 1e-6,
+            msg=f"fast first sample {first[0]:.6g}, accurate {first[1]:.6g}, "
+                f"max sample drift {drift:.6g} on a WAV fixture")
+
+
+class TestTwoPassChainEquality(unittest.TestCase):
+    """M1: pass 2's ``-af`` is pass 1's ``-af`` with the loudnorm term added.
+
+    The measured two-pass is correct only if pass 1 measures the same audio
+    pass 2 corrects. On the default declick-only chain a dropped chain drifts
+    0.0000 LU, which is why it hid; on this fixture -- trim, DC shift and a
+    highpass over sub-cutoff rumble -- it is LU-scale, so the guard cannot
+    hide. The two chain strings and the measured drift ride in every ``msg``.
+    """
+
+    # Measured on this machine by the task-3b report's mutation proof: dropping
+    # pass 1's chain (measuring the raw source) moves the level by 3.1 LU
+    # (raw -5.12 LUFS vs post-chain -8.24 LUFS). Trim + DC alone drift 0.0000
+    # LU here -- loudnorm gates out what the trim removes and K-weighting drops
+    # DC -- so the fixture adds a highpass over 45 Hz rumble.
+    DRIFT_LU = 3.1
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def loud_trimmed_source(self):
+        # A loud 300 Hz block (0.2..0.8 s) carrying a DC offset and sub-cutoff
+        # 45 Hz rumble, flanked by true digital silence. The trim removes the
+        # silence, dcshift removes the DC and highpass removes the rumble, so
+        # dropping the chain visibly moves the measured level.
+        def gen(i):
+            t = i / 48000.0
+            if 0.2 <= t < 0.8:
+                v = (0.5 * math.sin(2 * math.pi * 300 * t) + 0.10
+                     + 0.8 * math.sin(2 * math.pi * 45 * t))
+            else:
+                v = 0.0
+            return (v, v)
+        path = self.root / "fixture.wav"
+        path.write_bytes(_float_wav(gen, 1.0))
+        return path
+
+    def two_pass_af(self):
+        src = self.loud_trimmed_source()
+        cfg = _cfg(loudnorm=True, loudnorm_mode="linear", dc_shift=True,
+                   trim_silence=True, trim_threshold_db=-50,
+                   highpass=True, highpass_hz=80,
+                   edge_fade="declick", edge_fade_ms=5)
+        real = sample_tool.subprocess
+        seen = []
+
+        class Spy:
+            def run(self, cmd, *args, **kwargs):
+                seen.append(cmd)
+                return real.run(cmd, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        with mock.patch.object(sample_tool, "subprocess", Spy()), \
+             mock.patch.object(sample_tool.wb, "subprocess", Spy()):
+            sample_tool.extract_segment(src, self.root / "out.wav", 0.0, 1.0,
+                                        loudnorm=True, cfg=cfg)
+        measure = [cmd for cmd in seen
+                   if "print_format=json" in " ".join(cmd)][0]
+        cut = [cmd for cmd in seen if "-c:a" in cmd][0]
+        return (measure[measure.index("-af") + 1],
+                cut[cut.index("-af") + 1])
+
+    def test_pass_two_applies_the_chain_pass_one_measured(self):
+        measure_af, cut_af = self.two_pass_af()
+        p1_chain = measure_af.split("loudnorm=")[0].rstrip(",")
+        p2_chain = cut_af.split("loudnorm=")[0].rstrip(",")
+        p1_target = measure_af.split("loudnorm=")[1].split(":print_format=json")[0]
+        p2_target = cut_af.split("loudnorm=")[1]
+        self.assertIn(
+            "silenceremove", p1_chain,
+            msg=f"the fixture must exercise the trim chain so a dropped chain "
+                f"shifts ~{self.DRIFT_LU} LU; pass-1 chain was {p1_chain!r}")
+        self.assertEqual(
+            p1_chain, p2_chain,
+            msg=f"pass 1 measured chain {p1_chain!r} but pass 2 cut chain "
+                f"{p2_chain!r}; a dropped chain drifts ~{self.DRIFT_LU} LU")
+        self.assertTrue(
+            p2_target.startswith(p1_target),
+            msg=f"pass-1 loudnorm target {p1_target!r} must prefix pass-2's "
+                f"term {p2_target!r}; a shifted target changes the result")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
