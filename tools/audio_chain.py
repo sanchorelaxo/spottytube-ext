@@ -28,6 +28,15 @@ The filter order is fixed and meaningful::
   inside the reverse pair (an ``afade=t=in`` on the reversed stream, which is a
   fade-out at the true end); a fade-out anchored to the requested length would
   start past the shortened end and never land.
+* ``afade`` anchors are times on the **filter graph's clock**, so they are only
+  correct for a clock that begins where the cut does. With the range *after*
+  ``-i`` (``cut_seek="accurate"``) ffmpeg decodes from the file start and drops
+  the head only after the filters, so the graph runs on the source's own clock;
+  ``t0`` carries that origin in and both tapers follow it. Left at 0 /
+  ``seconds`` a taper sits outside the kept range, and because ``afade`` holds
+  its terminal gain, the cut comes out all zeros -- correct length, ffmpeg exit
+  0, nothing on stderr. :func:`cut_filters` documents the contract and
+  ``sample_tool.is_digital_silence`` refuses such a cut.
 * ``loudnorm`` closes the chain, so it measures and corrects the audio the
   fades have already shaped.
 * ``aresample`` is last: ``resampler=soxr`` when the resampler is not swr and
@@ -197,26 +206,48 @@ def _fade_seconds(cfg):
     return d if d > 0.0 else None
 
 
-def _fade_in(cfg):
-    """``afade=t=in`` from the start, or ``None``. In the reversed domain this
-    is also the tail taper (a fade-out at the true end)."""
+def _clock_anchor(t0):
+    """The ``afade`` ``st=`` for a graph clock whose origin sits at ``t0``.
+
+    A bare ``0`` at 0 keeps the default chain -- and every pinned string --
+    byte-identical to the historic one; anything else is the cut's start time,
+    at the same three decimals :func:`_fade_out` has always used.
+    """
+    return "0" if not t0 else f"{float(t0):.3f}"
+
+
+def _fade_in(cfg, t0=0.0):
+    """``afade=t=in`` from the cut's first sample, or ``None``.
+
+    In the reversed domain this is also the tail taper (a fade-out at the true
+    end). ``t0`` is that first sample's time on the filter graph's clock (see
+    :func:`cut_filters`): 0 for the default fast seek, the cut's start time for
+    the accurate one.
+    """
     d = _fade_seconds(cfg)
-    return f"afade=t=in:st=0:d={d:g}" if d is not None else None
+    return (f"afade=t=in:st={_clock_anchor(t0)}:d={d:g}"
+            if d is not None else None)
 
 
-def _fade_out(cfg, seconds):
-    """``afade=t=out`` anchored to ``seconds``, or ``None``.
+def _fade_out(cfg, seconds, t0=0.0):
+    """``afade=t=out`` anchored to the cut's last sample, or ``None``.
 
     Only used with the trim off, where ``seconds`` is the real stream length.
     With the trim on the tail fade is done in the reversed domain instead, so
     it lands on the shortened stream's true end.
+
+    ``t0`` and ``seconds`` are both graph-clock times, so the taper starts at
+    the cut's end *on that clock*: ``t0 + seconds - d``. Anchored at
+    ``seconds - d`` instead it starts in the past whenever the graph clock does
+    not begin at the cut, and because ``afade`` holds its terminal gain, that
+    silences the whole cut -- with ffmpeg exiting 0.
     """
     d = _fade_seconds(cfg)
     if d is None:
         return None
     # Never let the fade-out start before 0: on a segment shorter than twice
     # the fade the two tapers would overlap otherwise.
-    out_start = max(0.0, float(seconds) - d)
+    out_start = max(0.0, float(t0) + float(seconds) - d)
     return f"afade=t=out:st={out_start:.3f}:d={d:g}"
 
 
@@ -296,12 +327,25 @@ def final_filters(cfg):
 
 
 def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
-                measured=None):
+                measured=None, t0=0.0):
     """The comma-joined cut-pass filters for ``cfg``, or ``""`` if none apply.
 
     ``seconds`` is the length of the cut — with the trim off the fade-out start
     is measured back from its end. ``dc_offset`` is the measured DC offset of
     the source and is used only when ``cfg["dc_shift"]`` is on.
+
+    ``t0`` is the time of the cut's first sample on the filter graph's clock.
+    It is 0 whenever ffmpeg rebases the timeline to the cut, which is what the
+    default ``fast`` seek does by putting ``-ss``/``-t`` before ``-i``. With
+    the range *after* ``-i`` (``cut_seek="accurate"``) ffmpeg decodes from the
+    file start and applies the range only at the output stage, so the graph
+    sees the source's own clock and ``t0`` is the cut's start time. The
+    de-click tapers are absolute times on that clock, so a wrong ``t0`` is not
+    a cosmetic slip: an ``afade`` left outside the kept range holds its
+    terminal gain across it, and ffmpeg writes a correct-length, all-zero cut
+    with exit 0 and no warning. :func:`sample_tool._graph_origin` derives the
+    value from the seek mode and ``sample_tool.is_digital_silence`` refuses
+    such a cut.
 
     ``loudnorm``, ``loudnorm_i`` and ``measured`` are threaded straight to
     :func:`loudnorm_filter` (each ``None`` falls back to ``cfg``/off). The
@@ -318,17 +362,19 @@ def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
         # cannot be anchored to ``seconds``; doing it in the reversed domain as
         # afade=t=in lands it on the true end instead.
         parts.append(trim)
-        fade = _fade_in(cfg)
+        fade = _fade_in(cfg, t0)
         if fade:
             parts.append(fade)
         parts.append("areverse")
         parts.append(trim)
-        if fade:
-            parts.append(fade)
+        # The reverse pair restarts the filter clock at 0 — measured on both
+        # seek shapes — so the tail taper keeps its historic anchor and only
+        # the head taper follows the graph origin.
+        parts.append(_fade_in(cfg))
         parts.append("areverse")
     else:
-        parts.append(_fade_in(cfg))
-        parts.append(_fade_out(cfg, seconds))
+        parts.append(_fade_in(cfg, t0))
+        parts.append(_fade_out(cfg, seconds, t0))
     parts.append(loudnorm_filter(cfg, loudnorm, loudnorm_i, measured))
     parts.append(resample_filter(cfg))
     return ",".join(part for part in parts if part)

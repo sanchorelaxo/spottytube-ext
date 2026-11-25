@@ -588,6 +588,26 @@ def wav_seconds(path):
     return frames / wb.SAMPLE_RATE
 
 
+def is_digital_silence(path, chunk=1 << 16):
+    """True when every sample byte past the header is zero.
+
+    A cut can come out the right length and still be *digital* silence, which
+    the deck loads as a silent sample. ffmpeg is no help here: the de-click
+    tapers are absolute times on the filter graph's clock, and one anchored
+    outside the kept range holds gain 0 across the whole cut, so ffmpeg exits
+    0 with no warning on stderr (see :func:`audio_chain.cut_filters` and
+    :func:`_graph_origin`). Only the delivered bytes can tell.
+    """
+    with open(path, "rb") as handle:
+        handle.seek(PLAIN_WAV_HEADER)
+        while True:
+            block = handle.read(chunk)
+            if not block:
+                return True
+            if any(block):
+                return False
+
+
 def _overall_dc_offset(stderr):
     """Pull the mean DC offset out of ffmpeg ``astats`` stderr.
 
@@ -638,6 +658,23 @@ def _source_seek_args(src, start, seconds, seek="fast"):
     if seek == "accurate":
         return ["-i", str(src), "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}"]
     return ["-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", str(src)]
+
+
+def _graph_origin(seek, start):
+    """The filter graph's clock for a cut's first sample, from its seek mode.
+
+    The filters in the cut chain see timestamps, and *where* they start depends
+    on where the range sits: ``-ss``/``-t`` before ``-i`` (fast) make ffmpeg
+    rebase the timeline to the cut, so the first kept sample is 0; with the
+    range after ``-i`` (accurate) the demuxer decodes from the file start and
+    the muxer drops the head only after the filters, so the chain runs on the
+    source's own clock and the first kept sample is at ``start``.
+
+    :func:`audio_chain.cut_filters` anchors the de-click tapers with this, and a
+    taper outside the kept range holds its terminal gain across the whole cut:
+    a correct-length, all-zero WAV, written with ffmpeg exiting 0.
+    """
+    return float(start) if seek == "accurate" else 0.0
 
 
 def _probe_dc_offset(src, start, seconds, seek="fast"):
@@ -705,10 +742,11 @@ def _probe_loudnorm(src, start, seconds, cfg, loudnorm_i, dc_offset=0.0,
     corrected (a DC shift or silence trim would shift it otherwise). The
     measurement's target must equal the correction's target: ``target_offset``
     depends on it. ``seek`` is threaded through so the measurement reads the
-    same range the cut will. A failed pass raises :class:`RuntimeError` naming
-    ``loudnorm``.
+    same range the cut will -- and anchors its tapers to the same graph-clock
+    origin. A failed pass raises :class:`RuntimeError` naming ``loudnorm``.
     """
-    chain = ac.cut_filters(cfg, seconds, dc_offset, loudnorm=False)
+    chain = ac.cut_filters(cfg, seconds, dc_offset, loudnorm=False,
+                           t0=_graph_origin(seek, start))
     measure = (ac.loudnorm_filter(cfg, loudnorm=True, loudnorm_i=loudnorm_i)
                + ":print_format=json")
     cmd = [
@@ -766,6 +804,11 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0,
     # The cut_seek mode is read once and threaded through all three passes, so
     # the DC probe, the loudnorm measurement and the cut decode the same range.
     seek = "accurate" if ac.accurate_seek(cfg) else "fast"
+    # The de-click tapers are absolute times on the filter graph's clock, and
+    # where that clock starts follows the seek shape: a taper anchored to the
+    # cut alone lands in the source's past under the accurate seek and holds
+    # gain 0 across the whole cut.
+    t0 = _graph_origin(seek, start)
 
     cmd = [
         wb.ffmpeg(), "-y", "-loglevel", "error",
@@ -781,7 +824,7 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0,
             measured = _probe_loudnorm(src, start, seconds, cfg, loudnorm_i,
                                        dc_offset, seek)
         chain = ac.cut_filters(cfg, seconds, dc_offset, loudnorm=loudnorm,
-                               loudnorm_i=loudnorm_i, measured=measured)
+                               loudnorm_i=loudnorm_i, measured=measured, t0=t0)
         if chain:
             af_parts.append(chain)
     elif loudnorm:
@@ -820,6 +863,18 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0,
             f"source is shorter than the requested range: asked for "
             f"{seconds:.2f}s from {start:.2f}s, got {got:.2f}s (empty or "
             f"truncated segment)"
+        )
+
+    # The second half of the same trap: the right length is not proof of
+    # content. An all-zero cut loads on the deck as a silent sample, and
+    # ffmpeg reports nothing, so only the delivered bytes can tell.
+    if is_digital_silence(dst):
+        dst.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"the cut of {start:.2f}s..{start + seconds:.2f}s from "
+            f"{Path(src).name} is digital silence (every sample zero), which "
+            f"loads on the deck as a silent sample: check the source range and "
+            f"the cut filters"
         )
     return dst
 

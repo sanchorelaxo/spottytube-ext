@@ -1394,6 +1394,79 @@ class TestCutSeekMode(unittest.TestCase):
             msg=f"fast first sample {first[0]:.6g}, accurate {first[1]:.6g}, "
                 f"max sample drift {drift:.6g} on a WAV fixture")
 
+    def opus_source(self, seconds=30.0):
+        """A real Opus/WebM, the container the tool actually ingests."""
+        ffmpeg = sample_tool.wb.ffmpeg()
+        encoders = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
+                                  capture_output=True, text=True).stdout
+        if "libopus" not in encoders:
+            self.skipTest("this ffmpeg has no libopus encoder")
+        path = self.root / "src.webm"
+        subprocess.run(
+            [ffmpeg, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+             f"sine=frequency=440:duration={seconds:g}", "-c:a", "libopus",
+             "-b:a", "96k", str(path)],
+            check=True, capture_output=True)
+        return path
+
+    def test_accurate_cut_of_an_opus_source_keeps_the_audio(self):
+        # The bug the deck saw. Opus/WebM is what the tool ingests, and under
+        # the accurate seek the source clock left the fade-out taper in the
+        # source's past, so it held gain 0 across the whole cut: ffmpeg exited
+        # 0, the file had the right length, and only the content was gone.
+        # Both modes must deliver the tone at the same level.
+        src = self.opus_source()
+        levels = {}
+        for mode in ("fast", "accurate"):
+            dst = self.root / f"{mode}.wav"
+            sample_tool.extract_segment(
+                src, dst, 12.0, 9.0,
+                cfg=_cfg(cut_seek=mode, resampler="soxr",
+                         dither="triangular_hp"))
+            levels[mode] = _rms(_frames(dst))
+        self.assertGreater(
+            levels["accurate"], 0.01,
+            msg="a loud Opus source cut in accurate mode came out as silence "
+                f"(rms {levels['accurate']:.6g})")
+        self.assertAlmostEqual(
+            levels["fast"], levels["accurate"], delta=0.05,
+            msg=f"the seek modes disagree on level: {levels}")
+
+
+class TestDigitalSilenceGuard(unittest.TestCase):
+    """A correct length is not proof of content: refuse an all-zero cut."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def source(self, level):
+        path = self.root / "src.wav"
+        path.write_bytes(_float_wav(lambda i: (level, level), 2.0))
+        return path
+
+    def test_the_helper_sees_digital_silence_and_not_quiet_audio(self):
+        self.assertTrue(sample_tool.is_digital_silence(self.source(0.0)))
+        self.assertFalse(sample_tool.is_digital_silence(self.source(0.001)))
+
+    def test_an_all_zero_cut_is_refused_and_leaves_nothing_behind(self):
+        # The other half of the tape's bug: the pipeline delivered a
+        # right-length, all-zero WAV and the deck loaded a silent sample.
+        # A wrong cut must fail loudly, never reach the tape.
+        dst = self.root / "cut.wav"
+        with self.assertRaises(RuntimeError) as caught:
+            sample_tool.extract_segment(self.source(0.0), dst, 0.5, 1.0,
+                                        cfg=_cfg())
+        self.assertIn("digital silence", str(caught.exception))
+        self.assertFalse(dst.exists(), msg=f"{dst} was left behind")
+
+    def test_a_quiet_but_real_cut_is_not_refused(self):
+        # -60 dBFS is quiet, not empty: the guard must not be a level test.
+        dst = self.root / "cut.wav"
+        sample_tool.extract_segment(self.source(0.001), dst, 0.5, 1.0,
+                                    cfg=_cfg())
+        self.assertTrue(dst.exists())
+
 
 class TestTwoPassChainEquality(unittest.TestCase):
     """M1: pass 2's ``-af`` is pass 1's ``-af`` with the loudnorm term added.

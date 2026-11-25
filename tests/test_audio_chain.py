@@ -52,6 +52,36 @@ class TestEdgeFades(unittest.TestCase):
         self.assertIn("afade=t=out:st=0.000", out)
         self.assertNotIn("-", out)
 
+    def test_fades_follow_the_graph_clock_origin(self):
+        # The cut range can sit after -i (the accurate seek). ffmpeg then
+        # decodes from the file start and applies the range at the *output*
+        # stage, so the head reaches the filter graph and is dropped only
+        # after it: the chain sees the source's own clock. Both tapers must
+        # be anchored there. Left at 0 / seconds-d they sit outside the kept
+        # range, and because an afade holds its terminal gain, the fade-in
+        # zeroes everything before it or the fade-out zeroes everything after
+        # it -- a correct-length, all-zero WAV that ffmpeg writes with exit 0
+        # and no warning.
+        self.assertEqual(
+            ac.cut_filters(cfg(), 9.0, t0=12.0),
+            "afade=t=in:st=12.000:d=0.005,afade=t=out:st=20.995:d=0.005")
+
+    def test_a_zero_origin_keeps_the_historic_chain(self):
+        # The default fast seek rebases the timeline, so its chain -- and
+        # every string pinned above -- must stay exactly as it was.
+        self.assertEqual(ac.cut_filters(cfg(), 9.0, t0=0.0),
+                         ac.cut_filters(cfg(), 9.0))
+
+    def test_trim_pair_takes_the_origin_at_the_head_only(self):
+        # With the trim on the tail taper runs inside the reverse pair, where
+        # the clock restarts at 0, so only the head taper takes the origin.
+        chain = ac.cut_filters(cfg(trim_silence=True), 9.0, t0=12.0)
+        self.assertIn("afade=t=in:st=12.000:d=0.005", chain)
+        self.assertIn("afade=t=in:st=0:d=0.005", chain)
+        self.assertLess(chain.index("st=12.000"), chain.index("areverse"))
+        self.assertGreater(chain.index("afade=t=in:st=0"),
+                           chain.index("areverse"))
+
 
 class TestHighpassAndDc(unittest.TestCase):
     def test_highpass_default_cutoff_leads_the_chain(self):
