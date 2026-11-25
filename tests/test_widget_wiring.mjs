@@ -14,6 +14,16 @@ const manifest = JSON.parse(readFileSync(join(ext, "manifest.json"), "utf8"));
 
 const scripts = manifest.content_scripts[0].js;
 
+// Pull a top-level (two-space indented) function's source text out of
+// content.js so a test can run the SHIPPED body, not a re-implementation.
+// Fail-closed: if the pattern stops matching, the test must blow up rather
+// than silently assert against an empty string.
+function extract(name) {
+  const src = content.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`));
+  assert.ok(src, `could not extract ${name}() from content.js`);
+  return src[0];
+}
+
 test("speed.js is loaded before content.js uses it", () => {
   assert.ok(scripts.includes("speed.js"));
   assert.ok(scripts.indexOf("speed.js") < scripts.indexOf("content.js"));
@@ -243,14 +253,87 @@ test("a collapsed group hides its rows through the author rule", () => {
 });
 
 test("neither the group nor the panel nests a second scroller", () => {
-  const afterGroup = content.slice(content.indexOf(".sgroup"));
+  const iGroup = content.indexOf(".sgroup");
+  assert.ok(iGroup !== -1, "the .sgroup rule must exist before we inspect it");
+  const afterGroup = content.slice(iGroup);
   const block = afterGroup.slice(0, afterGroup.indexOf("}") + 1);
   assert.doesNotMatch(block, /max-height|overflow/);
 });
 
-test("both section payload shapes are accepted", () => {
-  assert.match(content, /Array\.isArray\(entry\)/);
-  assert.match(content, /entry\.key/);
+// The shipped function bodies run against plain-object stubs. The bridge sends
+// objects now; a stale bridge may still send [key, label] pairs, and when it
+// sends no sections at all the order is derived from the schema. All three
+// paths are exercised through sectionOrder() itself, not a copy of its logic.
+test("sectionOrder normalizes the new, stale and derived payload shapes", () => {
+  const make = (sections) => new Function(
+    "settingsState",
+    extract("sectionOrder") + "\nreturn sectionOrder;"
+  )({ sections });
+
+  // 1. current bridge: object entries, with the collapsible hint preserved.
+  const fixture = [
+    { key: "audio", label: "Audio pipeline" },
+    { key: "advanced", label: "Advanced", collapsible: true, collapsed: true }
+  ];
+  const ordered = make(fixture)([]);
+  assert.deepEqual(ordered, [
+    { key: "audio", label: "Audio pipeline", collapsible: false, collapsed: false },
+    { key: "advanced", label: "Advanced", collapsible: true, collapsed: true }
+  ]);
+
+  // 2. stale bridge: legacy [key, label] pairs normalize to the object shape.
+  const stale = make([["audio", "Audio pipeline"], ["advanced", "Advanced"]])("whatever"); 
+  assert.deepEqual(stale, [
+    { key: "audio", label: "Audio pipeline", collapsible: false, collapsed: false },
+    { key: "advanced", label: "Advanced", collapsible: false, collapsed: false }
+  ]);
+
+  // 3. schema-derived fallback: one entry per distinct section, first-seen
+  // order, and a repeated section key does not duplicate the entry.
+  const derived = make([])([
+    { key: "a1", section: "audio" },
+    { key: "a2", section: "audio" },
+    { key: "b1", section: "advanced" }
+  ]);
+  assert.deepEqual(derived, [
+    { key: "audio", label: "audio", collapsible: false, collapsed: false },
+    { key: "advanced", label: "advanced", collapsible: false, collapsed: false }
+  ]);
+});
+
+// The collapse state is ephemeral (spec 71-74): closing the panel must forget
+// which groups were opened, so the next open re-collapses Advanced. This runs
+// the SHIPPED closeSettings() against plain stubs; delete the clear() and it
+// fails.
+test("closeSettings forgets the collapse state so the next open re-collapses", () => {
+  const state = { open: true, collapsed: new Map() };
+  const el = { settings: { hidden: false }, panel: { style: {} } };
+  const closeSettings = new Function(
+    "settingsState", "el",
+    extract("closeSettings") + "\nreturn closeSettings;"
+  )(state, el);
+
+  state.collapsed.set("advanced", false);   // the user opened Advanced
+  closeSettings();
+
+  assert.equal(state.collapsed.size, 0, "the remembered collapse state must be dropped on close");
+  assert.equal(state.open, false);
+  assert.equal(el.settings.hidden, true);
+});
+
+// The collapsible head is a div with role="button", so it must answer the
+// keyboard itself. Its keydown handler needs a real DOM to run, so this greps
+// the shipped handler's slice (not the whole file) and fails if the listener,
+// either key, preventDefault, or the toggle call goes missing.
+test("the collapsible head toggles on both Enter and Space", () => {
+  const fn = extract("renderFields");
+  const i = fn.indexOf('addEventListener("keydown"');
+  assert.ok(i !== -1, "the collapsible head must carry a keydown listener");
+  const handler = fn.slice(i, fn.indexOf("});", i) + 3);
+  assert.match(handler, /event\.key === "Enter"/);
+  assert.match(handler, /event\.key === " "/);
+  assert.match(handler, /event\.preventDefault\(\)/);
+  assert.match(handler, /setOpen\(/);
 });
 
 test("opening settings clamps the tall panel back into the viewport", () => {

@@ -808,6 +808,7 @@
 
   function closeSettings() {
     settingsState.open = false;
+    settingsState.collapsed.clear();   // "collapsed by default": the state is ephemeral (spec 71-74), cleared each close
     el.settings.hidden = true;
     el.panel.style.display = "";
   }
