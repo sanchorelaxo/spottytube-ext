@@ -627,7 +627,10 @@
         opt.textContent = choice.label || String(choice.value);
         input.appendChild(opt);
       });
-      input.value = value == null ? "" : String(value);
+      // A <select> whose value matches no option silently shows the FIRST
+      // option, so falling back to "" here made the Placement mode row default
+      // to bump (and Save then persisted bump), never the schema's append.
+      input.value = value == null ? String(field.default ?? "") : String(value);
     } else if (field.control === "checkbox") {
       input = document.createElement("input");
       input.type = "checkbox";

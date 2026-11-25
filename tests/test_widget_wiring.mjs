@@ -178,6 +178,20 @@ test("every settings row label points at its own control", () => {
   assert.match(content, /label\.htmlFor = input\.id/);
 });
 
+test("a select with no stored value falls back to the schema default", () => {
+  // A <select> whose value matches no option silently shows the FIRST option,
+  // so falling back to "" made the Placement mode row default to bump and then
+  // persist bump on Save, never the schema's append. The select branch must
+  // fall back to field.default instead.
+  const fn = extract("fieldRow");
+  const start = fn.indexOf('field.control === "select"');
+  const end = fn.indexOf('field.control === "checkbox"');
+  assert.ok(start > -1 && end > start, "the select branch must exist before we inspect it");
+  const select = fn.slice(start, end);
+  assert.match(select, /value == null \? String\(field\.default \?\? ""\)/);
+  assert.doesNotMatch(select, /value == null \? ""/);
+});
+
 test("the readout cells pair label and output with for/id", () => {
   assert.match(content, /<label for="spottytube-out-start">START<\/label><output id="spottytube-out-start">/);
   assert.match(content, /<label for="spottytube-out-end">END<\/label><output id="spottytube-out-end">/);
