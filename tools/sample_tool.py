@@ -621,6 +621,16 @@ def _overall_dc_offset(stderr):
     )
 
 
+def _source_seek_args(src, start, seconds):
+    """The shared ``-ss``/``-t``/``-i`` argv for a ranged ffmpeg read.
+
+    Input seeking (``-ss`` *before* ``-i``) is what makes the cut exact and
+    fast. The DC probe, the loudnorm measurement and the cut pass must build
+    this identically or they drift, so it lives in one place.
+    """
+    return ["-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", str(src)]
+
+
 def _probe_dc_offset(src, start, seconds):
     """Measure the source's mean DC offset over the cut range (one pass).
 
@@ -631,8 +641,8 @@ def _probe_dc_offset(src, start, seconds):
     """
     cmd = [
         wb.ffmpeg(), "-hide_banner",
-        "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
-        "-i", str(src), "-af", "astats", "-f", "null", "-",
+        *_source_seek_args(src, start, seconds),
+        "-af", "astats", "-f", "null", "-",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -641,6 +651,67 @@ def _probe_dc_offset(src, start, seconds):
             f"({result.stderr.strip()})"
         )
     return _overall_dc_offset(result.stderr)
+
+
+def _parse_loudnorm_json(stderr):
+    """Map a pass-1 loudnorm measurement onto pass-2 flags, or raise.
+
+    A linear :func:`extract_segment` reads the source's loudness from a
+    ``loudnorm=...:print_format=json`` pass. That pass must *not* use
+    ``-loglevel error`` — that swallows the block. The JSON arrives on stderr
+    with ``input_i``, ``input_tp``, ``input_lra``, ``input_thresh`` and
+    ``target_offset``; this returns the exact flag names pass 2 expects.
+    Raises :class:`RuntimeError` naming ``loudnorm`` when the block is absent
+    or unreadable, rather than normalising blind.
+    """
+    match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", stderr, re.S)
+    if not match:
+        raise RuntimeError(
+            "loudnorm: ffmpeg printed no measurement block on stderr, so the "
+            "linear pass had nothing to correct with"
+        )
+    try:
+        block = json.loads(match.group(0))
+        return {
+            "measured_I": float(block["input_i"]),
+            "measured_TP": float(block["input_tp"]),
+            "measured_LRA": float(block["input_lra"]),
+            "measured_thresh": float(block["input_thresh"]),
+            "offset": float(block["target_offset"]),
+        }
+    except (ValueError, KeyError) as error:
+        raise RuntimeError(
+            f"loudnorm: the measurement block was unreadable ({error})"
+        ) from None
+
+
+def _probe_loudnorm(src, start, seconds, cfg, loudnorm_i, dc_offset=0.0):
+    """Measure the source's loudness over the cut range (one pass, linear mode).
+
+    Spawned only when :func:`audio_chain.needs_loudnorm_probe` is true. The
+    pass applies the same cut chain the correction pass will, minus the
+    ``loudnorm`` term itself, so the reading matches the audio about to be
+    corrected (a DC shift or silence trim would shift it otherwise). The
+    measurement's target must equal the correction's target: ``target_offset``
+    depends on it. A failed pass raises :class:`RuntimeError` naming
+    ``loudnorm``.
+    """
+    chain = ac.cut_filters(cfg, seconds, dc_offset, loudnorm=False)
+    measure = (ac.loudnorm_filter(cfg, loudnorm=True, loudnorm_i=loudnorm_i)
+               + ":print_format=json")
+    cmd = [
+        wb.ffmpeg(), "-hide_banner",
+        *_source_seek_args(src, start, seconds),
+        "-af", f"{chain},{measure}" if chain else measure,
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "loudnorm: the linear measurement pass failed "
+            f"({result.stderr.strip()})"
+        )
+    return _parse_loudnorm_json(result.stderr)
 
 
 def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0,
@@ -653,14 +724,19 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0,
 
     ``loudnorm`` runs ffmpeg's EBU R128 filter over the cut so every sample
     lands at the same perceived loudness; ``loudnorm_i`` is the target in
-    LUFS (TP -1.5, LRA 11 are the customary companions).
+    LUFS. True peak and LRA come from ``cfg`` (``loudnorm_tp``/``loudnorm_lra``)
+    when a settings dict is given, else the customary -1.5 / 11.
 
     ``cfg`` is a full settings dict (as :func:`settings.load` returns). When it
     is given, the advanced cut-pass filters — high-pass, DC shift, silence trim
     and the edge de-click — are prepended to the ``-af`` chain via
-    :func:`audio_chain.cut_filters`. When it is ``None`` the behaviour is
-    exactly as before, which is what keeps the default path byte-for-byte
-    identical.
+    :func:`audio_chain.cut_filters`, and loudnorm closes it. When ``cfg``
+    selects ``loudnorm_mode == "linear"``, the cut becomes a *measured
+    two-pass*: a first pass measures the source's loudness (one extra ffmpeg
+    run, see :func:`_probe_loudnorm`) and its JSON feeds ``linear=true`` in the
+    cut. When ``cfg`` is ``None`` the behaviour is exactly as before — the
+    legacy single-command loudnorm — which is what keeps the default path
+    byte-for-byte identical.
 
     Enforces the absolute envelope here as well: :data:`RAW_CUT_CEILING` is
     the longest range any player speed can still fit on the deck (42 s at the
@@ -677,18 +753,24 @@ def extract_segment(src, dst, start, seconds, loudnorm=False, loudnorm_i=-16.0,
 
     cmd = [
         wb.ffmpeg(), "-y", "-loglevel", "error",
-        "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
-        "-i", str(src),
+        *_source_seek_args(src, start, seconds),
     ]
     af_parts = []
     if cfg is not None:
         dc_offset = 0.0
         if ac.needs_dc_probe(cfg):
             dc_offset = _probe_dc_offset(src, start, seconds)
-        chain = ac.cut_filters(cfg, seconds, dc_offset)
+        measured = None
+        if ac.needs_loudnorm_probe(cfg, loudnorm):
+            measured = _probe_loudnorm(src, start, seconds, cfg, loudnorm_i,
+                                       dc_offset)
+        chain = ac.cut_filters(cfg, seconds, dc_offset, loudnorm=loudnorm,
+                               loudnorm_i=loudnorm_i, measured=measured)
         if chain:
             af_parts.append(chain)
-    if loudnorm:
+    elif loudnorm:
+        # No settings dict: the legacy single-command hardcode, unchanged so
+        # the default path stays byte-for-byte identical.
         af_parts.append(f"loudnorm=I={float(loudnorm_i):g}:TP=-1.5:LRA=11")
     if af_parts:
         cmd += ["-af", ",".join(af_parts)]

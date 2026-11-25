@@ -140,5 +140,81 @@ class TestOrder(unittest.TestCase):
         self.assertEqual(ac.cut_filters(quiet, 5.0), "")
 
 
+class TestLoudnorm(unittest.TestCase):
+    """Loudnorm completion: true peak, LRA, and the measured two-pass.
+
+    Pure builder only -- the real-ffmpeg behaviour is pinned in
+    ``tests/test_sample_tool.py``. The measured numbers below are the ones a
+    real ffmpeg n9.0.1 pass 1 printed for the uneven 3 s fixture (220 Hz,
+    0.05/0.9/0.15 per second): input_i=-2.97, input_tp=-0.92, input_lra=0.40,
+    input_thresh=-16.21, target_offset=-3.53.
+    """
+
+    MEASURED = {"measured_I": -2.97, "measured_TP": -0.92,
+                "measured_LRA": 0.40, "measured_thresh": -16.21,
+                "offset": -3.53}
+
+    def test_default_companions_reproduce_the_legacy_hardcode(self):
+        # R8: loudnorm on, tp/lra/mode at their defaults, must equal the old
+        # hardcoded term byte-for-byte.
+        got = ac.loudnorm_filter(cfg(loudnorm=True))
+        self.assertEqual(got, "loudnorm=I=-16:TP=-1.5:LRA=11",
+                         msg=f"default loudnorm term was {got!r}")
+
+    def test_companions_are_used_and_the_target_can_be_overridden(self):
+        got = ac.loudnorm_filter(cfg(loudnorm=True, loudnorm_tp=-2, loudnorm_lra=7))
+        self.assertEqual(got, "loudnorm=I=-16:TP=-2:LRA=7",
+                         msg=f"custom tp/lra gave {got!r}")
+        alt = ac.loudnorm_filter(cfg(loudnorm=True), loudnorm_i=-20)
+        self.assertEqual(alt, "loudnorm=I=-20:TP=-1.5:LRA=11",
+                         msg=f"explicit -20 LUFS target gave {alt!r}")
+
+    def test_loudnorm_off_yields_an_empty_term(self):
+        self.assertEqual(ac.loudnorm_filter(cfg(loudnorm=False)), "",
+                         msg="loudnorm off must yield no term at all")
+
+    def test_measured_values_append_in_ffmpeg_order_with_linear(self):
+        got = ac.loudnorm_filter(cfg(loudnorm=True, loudnorm_mode="linear"),
+                                 measured=self.MEASURED)
+        self.assertEqual(
+            got,
+            "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=-2.97:measured_TP=-0.92:"
+            "measured_LRA=0.4:measured_thresh=-16.21:offset=-3.53:linear=true",
+            msg=f"measured term was {got!r}")
+
+    def test_needs_loudnorm_probe_only_for_linear(self):
+        self.assertIs(
+            ac.needs_loudnorm_probe(cfg(loudnorm=True, loudnorm_mode="linear")),
+            True,
+            msg="linear mode on a loudnorm build must ask for a probe")
+        self.assertIs(
+            ac.needs_loudnorm_probe(cfg(loudnorm=True)), False,
+            msg="dynamic mode must spawn no measurement pass")
+        self.assertIs(
+            ac.needs_loudnorm_probe(cfg(loudnorm=False, loudnorm_mode="linear")),
+            False,
+            msg="loudnorm off must never probe even in linear mode")
+
+    def test_loudnorm_term_sits_after_the_fades(self):
+        # R2 ordering: highpass -> ... -> afade -> loudnorm.
+        chain = ac.cut_filters(cfg(loudnorm=True, edge_fade="declick"), 10.0)
+        self.assertLess(chain.index("afade"), chain.index("loudnorm"),
+                        msg=f"loudnorm must follow the fades: {chain!r}")
+        self.assertTrue(chain.endswith("loudnorm=I=-16:TP=-1.5:LRA=11"),
+                        msg=f"loudnorm must close the chain: {chain!r}")
+
+    def test_loudnorm_off_adds_no_term_to_the_chain(self):
+        chain = ac.cut_filters(cfg(loudnorm=False, edge_fade="declick"), 10.0)
+        self.assertNotIn("loudnorm", chain,
+                         msg=f"no loudnorm term expected: {chain!r}")
+
+    def test_measured_chain_is_the_two_pass_cut_filter(self):
+        chain = ac.cut_filters(
+            cfg(loudnorm=True, loudnorm_mode="linear", edge_fade="off"), 5.0,
+            loudnorm=True, measured=self.MEASURED)
+        self.assertIn("linear=true", chain, msg=f"chain was {chain!r}")
+        self.assertIn("measured_I=-2.97", chain, msg=f"chain was {chain!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -9,7 +9,7 @@ are unit-testable without spawning a process.
 
 The filter order is fixed and meaningful::
 
-    highpass -> dcshift -> silenceremove -> afade
+    highpass -> dcshift -> silenceremove -> afade -> loudnorm
 
 * ``highpass`` removes sub-audible rumble first, so what follows — most
   visibly the ``silenceremove`` threshold — sees the high-passed signal. It
@@ -24,11 +24,24 @@ The filter order is fixed and meaningful::
   inside the reverse pair (an ``afade=t=in`` on the reversed stream, which is a
   fade-out at the true end); a fade-out anchored to the requested length would
   start past the shortened end and never land.
+* ``loudnorm`` closes the chain, so it measures and corrects the audio the
+  fades have already shaped.
+
+The de-click stays click-free even where the two tapers overlap: on a cut
+shorter than twice the fade, ``afade=t=out`` is anchored at 0 so the in- and
+out-tapers multiply instead of crossing, and the product is still 0 at both
+ends (a 4 ms tone under a 50 ms fade measures a 0.0008 mid-point). The
+behaviour is intentional and unchanged; this note only records it.
 
 :func:`needs_dc_probe` tells the caller whether it must measure the source's DC
 offset (an extra ffmpeg ``astats`` pass) before the chain can be built. When it
 returns False the cut stays a single ffmpeg pass — the default path never grows
 a second one.
+
+:func:`needs_loudnorm_probe` is the loudnorm twin: ``loudnorm_mode == "linear"``
+is a real measured two-pass, so it needs the source's loudness (an extra ffmpeg
+pass reading the pass-1 JSON) before the chain can be built. ``"dynamic"``
+needs no probe.
 """
 
 
@@ -39,6 +52,51 @@ def needs_dc_probe(cfg):
     when a shift will actually consume it.
     """
     return bool(cfg["dc_shift"])
+
+
+def needs_loudnorm_probe(cfg, loudnorm=None):
+    """True when loudnorm is on *and* linear mode is selected.
+
+    Linear mode is the measured two-pass: it costs one extra ffmpeg pass to
+    measure the source before the cut that applies the correction. Dynamic mode
+    computes its correction in the single cut pass and needs no probe.
+
+    ``loudnorm`` overrides ``cfg["loudnorm"]`` so the caller can thread the
+    resolved on/off (CLI precedence) through.
+    """
+    if loudnorm is None:
+        loudnorm = cfg["loudnorm"]
+    return bool(loudnorm) and str(cfg["loudnorm_mode"]) == "linear"
+
+
+def loudnorm_filter(cfg, loudnorm=None, loudnorm_i=None, measured=None):
+    """The ``loudnorm`` term for the cut chain, or ``""`` when loudnorm is off.
+
+    ``TP`` and ``LRA`` come from ``cfg``; ``I`` from ``loudnorm_i`` (falling
+    back to ``cfg["loudnorm_i"]``); all three use ``%g``, so the defaults print
+    exactly as the legacy hardcode did (``I=-16:TP=-1.5:LRA=11``). When
+    ``measured`` is given — the dict a linear pass 1 produced — the five
+    measured values and ``linear=true`` are appended in the order ffmpeg
+    requires: ``measured_I``, ``measured_TP``, ``measured_LRA``,
+    ``measured_thresh``, ``offset``.
+    """
+    if loudnorm is None:
+        loudnorm = cfg["loudnorm"]
+    if not loudnorm:
+        return ""
+    if loudnorm_i is None:
+        loudnorm_i = cfg["loudnorm_i"]
+    term = (f"loudnorm=I={float(loudnorm_i):g}"
+            f":TP={float(cfg['loudnorm_tp']):g}"
+            f":LRA={float(cfg['loudnorm_lra']):g}")
+    if measured is not None:
+        term += (f":measured_I={float(measured['measured_I']):g}"
+                 f":measured_TP={float(measured['measured_TP']):g}"
+                 f":measured_LRA={float(measured['measured_LRA']):g}"
+                 f":measured_thresh={float(measured['measured_thresh']):g}"
+                 f":offset={float(measured['offset']):g}"
+                 f":linear=true")
+    return term
 
 
 def _highpass(cfg):
@@ -89,14 +147,13 @@ def _fade_out(cfg, seconds):
     return f"afade=t=out:st={out_start:.3f}:d={d:g}"
 
 
-def _trim_head(cfg):
-    if not cfg["trim_silence"]:
-        return None
-    threshold = f"{float(cfg['trim_threshold_db']):g}dB"
-    return f"silenceremove=start_periods=1:detection=peak:start_threshold={threshold}"
+def _silence_trim(cfg):
+    """The ``silenceremove`` head-trim term, or ``None``.
 
-
-def _trim_tail(cfg):
+    One helper serves both ends: the tail is trimmed by the same
+    ``start_periods=1`` term applied inside the reverse pair, so head and tail
+    build the identical string and only the surrounding ``areverse`` differs.
+    """
     if not cfg["trim_silence"]:
         return None
     threshold = f"{float(cfg['trim_threshold_db']):g}dB"
@@ -104,31 +161,37 @@ def _trim_tail(cfg):
             f"start_threshold={threshold}")
 
 
-def cut_filters(cfg, seconds, dc_offset=0.0):
-    """The comma-joined cut-pass filters for ``cfg``, or ``""`` if none apply.
+def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
+                measured=None):
+    """The comma-joined cut-pass filters for ``cfg``, or ``\"\"`` if none apply.
 
     ``seconds`` is the length of the cut — with the trim off the fade-out start
     is measured back from its end. ``dc_offset`` is the measured DC offset of
     the source and is used only when ``cfg["dc_shift"]`` is on.
+
+    ``loudnorm``, ``loudnorm_i`` and ``measured`` are threaded straight to
+    :func:`loudnorm_filter` (each ``None`` falls back to ``cfg``/off). The
+    loudnorm term closes the chain, after the fades.
     """
     parts = [_highpass(cfg), _dc_shift(cfg, dc_offset)]
-    head = _trim_head(cfg)
-    if head:
+    trim = _silence_trim(cfg)
+    if trim:
         # Trim the head, fade the head, then one reverse pair that trims the
         # tail silence and fades the tail. ffmpeg's afade rejects a negative
         # start, so once silenceremove has shortened the stream the tail fade
         # cannot be anchored to ``seconds``; doing it in the reversed domain as
         # afade=t=in lands it on the true end instead.
-        parts.append(head)
+        parts.append(trim)
         fade = _fade_in(cfg)
         if fade:
             parts.append(fade)
         parts.append("areverse")
-        parts.append(_trim_tail(cfg))
+        parts.append(trim)
         if fade:
             parts.append(fade)
         parts.append("areverse")
     else:
         parts.append(_fade_in(cfg))
         parts.append(_fade_out(cfg, seconds))
+    parts.append(loudnorm_filter(cfg, loudnorm, loudnorm_i, measured))
     return ",".join(part for part in parts if part)

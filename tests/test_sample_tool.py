@@ -901,11 +901,21 @@ class TestCutPassChain(unittest.TestCase):
         trimmed = len(samples) / 48000.0
         window = int(0.001 * 48000)                  # the last 1 ms
         tail_peak = max(abs(x) for x in samples[-window:])
-        print(f"\n[edge-fade] trimmed={trimmed:.4f}s "
-              f"last_sample={samples[-1]:.4f} tail_peak={tail_peak:.4f}")
-        self.assertLess(trimmed, 0.9)                # genuinely shorter
-        self.assertLess(abs(samples[-1]), 0.05)      # ends at silence
-        self.assertLess(tail_peak, 0.2)              # the taper really landed
+        # The fixture body is 0.5 between 0.2s and 0.8s. An all-silent output
+        # would also pass the edge assertions below, so pin the middle at full
+        # level to prove the cut survived (Task 2b MINOR).
+        middle = samples[len(samples) // 2]
+        self.assertLess(trimmed, 0.9,
+                        msg=f"trimmed length {trimmed:.4f}s should be < 0.9s")
+        self.assertLess(abs(samples[-1]), 0.05,
+                        msg=f"last sample {samples[-1]:.4f} should end at silence")
+        self.assertLess(tail_peak, 0.2,
+                        msg=f"tail peak {tail_peak:.4f} over the last 1 ms "
+                            f"(trimmed={trimmed:.4f}s, last={samples[-1]:.4f}) "
+                            f"should show the taper landed")
+        self.assertGreater(abs(middle), 0.4,
+                           msg=f"middle sample {middle:.4f} should stay at the "
+                               f"fixture body level 0.5 (trimmed={trimmed:.4f}s)")
 
     def test_start_past_the_end_still_raises_with_trim_on(self):
         src = self.source(seconds=1.0)
@@ -1001,6 +1011,201 @@ class TestDcProbeFailure(unittest.TestCase):
                   "[Parsed_astats_0 @ 0x1] DC offset: 0.012345\n"
                   "[Parsed_astats_0 @ 0x1] Peak level dB: -6.0\n")
         self.assertAlmostEqual(sample_tool._overall_dc_offset(stderr), 0.012345)
+
+
+# --- Task 3: loudnorm true peak, LRA and the measured two-pass -------------
+
+
+def _measure_loudness(path):
+    """FFmpeg's own integrated-loudness reading (LUFS) for a Spotykach WAV.
+
+    Used only to prove the observable: linear mode lands on the target where
+    dynamic misses. It reuses the production parser, so a broken parser fails
+    the measurement the same way the tool would.
+    """
+    cmd = [sample_tool.wb.ffmpeg(), "-hide_banner", "-i", str(path),
+           "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+           "-f", "null", "-"]
+    result = sample_tool.subprocess.run(cmd, capture_output=True, text=True)
+    return sample_tool._parse_loudnorm_json(result.stderr)["measured_I"]
+
+
+class TestLoudnormJsonParse(unittest.TestCase):
+    """R5: parsing the pass-1 JSON, and failing loudly when it is absent."""
+
+    # The exact block a real ffmpeg n9.0.1 pass 1 printed on stderr for the
+    # uneven 3 s fixture (220 Hz, amp 0.05/0.9/0.15).
+    REAL_BLOCK = (
+        "[Parsed_loudnorm_0 @ 0x1] \n{\n"
+        '\t"input_i" : "-2.97",\n'
+        '\t"input_tp" : "-0.92",\n'
+        '\t"input_lra" : "0.40",\n'
+        '\t"input_thresh" : "-16.21",\n'
+        '\t"output_i" : "-12.47",\n'
+        '\t"output_tp" : "-10.42",\n'
+        '\t"output_lra" : "0.00",\n'
+        '\t"output_thresh" : "-25.56",\n'
+        '\t"normalization_type" : "dynamic",\n'
+        '\t"target_offset" : "-3.53"\n}\n')
+
+    def test_parses_the_block_into_pass_two_flags(self):
+        got = sample_tool._parse_loudnorm_json(self.REAL_BLOCK)
+        self.assertEqual(
+            got,
+            {"measured_I": -2.97, "measured_TP": -0.92, "measured_LRA": 0.40,
+             "measured_thresh": -16.21, "offset": -3.53},
+            msg=f"parsed measurement was {got!r}")
+
+    def test_missing_block_raises_naming_loudnorm(self):
+        with self.assertRaises(RuntimeError) as caught:
+            sample_tool._parse_loudnorm_json("no json block here\n")
+        message = str(caught.exception)
+        self.assertIn("loudnorm", message,
+                      msg=f"the error must name loudnorm: {message!r}")
+        self.assertNotIn("dc_shift", message,
+                         msg="loudnorm wording must be distinct from the DC "
+                             "errors")
+
+    def test_json_without_input_i_is_not_a_measurement(self):
+        with self.assertRaises(RuntimeError) as caught:
+            sample_tool._parse_loudnorm_json('{"foo" : "bar"}\n')
+        self.assertIn("loudnorm", str(caught.exception),
+                      msg="a block with no input_i must not satisfy the parse")
+
+
+class TestLoudnormCompletion(unittest.TestCase):
+    """R7/R9: the two-pass against real ffmpeg, honest pass counts.
+
+    Fixture: 3 s stereo, 220 Hz, amplitude 0.05/0.9/0.15 per second — uneven
+    on purpose, so dynamic loudnorm visibly misses the target.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def uneven_source(self):
+        def gen(i):
+            t = i / 48000.0
+            amp = (0.05, 0.9, 0.15)[int(t)]
+            v = amp * math.sin(2 * math.pi * 220 * t)
+            return (v, v)
+        path = self.root / "uneven.wav"
+        path.write_bytes(_float_wav(gen, 3.0))
+        return path
+
+    def test_linear_lands_on_target_where_dynamic_misses(self):
+        src = self.uneven_source()
+        dynamic = self.root / "dynamic.wav"
+        sample_tool.extract_segment(
+            src, dynamic, 0.0, 3.0, loudnorm=True,
+            cfg=_cfg(loudnorm=True, loudnorm_mode="dynamic"))
+        linear = self.root / "linear.wav"
+        sample_tool.extract_segment(
+            src, linear, 0.0, 3.0, loudnorm=True,
+            cfg=_cfg(loudnorm=True, loudnorm_mode="linear"))
+        dyn_i = _measure_loudness(dynamic)
+        lin_i = _measure_loudness(linear)
+        # The observable that proves this feature (design spec :127-128).
+        self.assertLess(abs(lin_i + 16.0), 0.5,
+                        msg=f"linear landed at {lin_i:.2f} LUFS, "
+                            f"{abs(lin_i + 16.0):.2f} LU off the -16 target")
+        self.assertGreater(abs(dyn_i + 16.0), 1.0,
+                           msg=f"dynamic landed at {dyn_i:.2f} LUFS — only "
+                               f"{abs(dyn_i + 16.0):.2f} LU off, so the two "
+                               f"modes are indistinguishable here")
+
+    def test_linear_still_produces_a_valid_spotykach_wav(self):
+        src = self.uneven_source()
+        dst = self.root / "linear.wav"
+        sample_tool.extract_segment(
+            src, dst, 0.0, 2.0, loudnorm=True,
+            cfg=_cfg(loudnorm=True, loudnorm_mode="linear"))
+        raw = dst.read_bytes()
+        self.assertEqual(raw[:4], b"RIFF", msg="not a RIFF WAV")
+        audio_format, channels, rate = struct.unpack_from("<HHI", raw, 20)
+        bits = struct.unpack_from("<H", raw, 34)[0]
+        self.assertEqual((audio_format, channels, rate), (3, 2, 48000),
+                         msg=f"header was format {audio_format}, {channels}ch "
+                             f"@ {rate}Hz")
+        self.assertEqual(bits, 32, msg=f"header was {bits}-bit")
+        got = wav_seconds(dst)
+        self.assertAlmostEqual(got, 2.0, delta=0.05,
+                               msg=f"duration was {got:.3f}s, wanted ~2.0s")
+
+    def test_linear_costs_exactly_one_extra_ffmpeg_pass(self):
+        # Patch both sample_tool.subprocess and wb.convert's own module so the
+        # count is every spawn of the cut pipeline. Contract (R7): dynamic adds
+        # no pass, linear adds exactly the one measurement pass, and linear +
+        # dc_shift adds that probe too.
+        src = self.uneven_source()
+        real = sample_tool.subprocess
+
+        class Spy:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, cmd, *args, **kwargs):
+                self.calls.append(cmd)
+                return real.run(cmd, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        def passes(cfg, name):
+            spy = Spy()
+            with mock.patch.object(sample_tool, "subprocess", spy), \
+                 mock.patch.object(sample_tool.wb, "subprocess", spy):
+                sample_tool.extract_segment(src, self.root / name, 0.0, 1.0,
+                                            loudnorm=True, cfg=cfg)
+            return spy
+
+        dynamic = passes(_cfg(loudnorm=True, loudnorm_mode="dynamic"), "d.wav")
+        self.assertEqual(len(dynamic.calls), 2,
+                         msg=f"dynamic loudnorm must be cut + convert only, "
+                             f"got {len(dynamic.calls)} passes")
+
+        linear = passes(_cfg(loudnorm=True, loudnorm_mode="linear"), "l.wav")
+        self.assertEqual(len(linear.calls), 3,
+                         msg=f"linear loudnorm must add exactly one measurement "
+                             f"pass, got {len(linear.calls)} passes")
+        self.assertEqual(
+            sum(1 for cmd in linear.calls if "print_format=json" in " ".join(cmd)),
+            1, msg="exactly one loudnorm measurement pass expected")
+
+        both = passes(_cfg(loudnorm=True, loudnorm_mode="linear",
+                           dc_shift=True), "b.wav")
+        self.assertEqual(len(both.calls), 4,
+                         msg=f"linear + dc_shift must be probe + measure + cut "
+                             f"+ convert, got {len(both.calls)} passes")
+        self.assertEqual(
+            sum(1 for cmd in both.calls if "astats" in " ".join(cmd)), 1,
+            msg="exactly one astats DC probe expected")
+
+    def test_measurement_pass_carries_no_loglevel_error(self):
+        # -loglevel error swallows the loudnorm JSON block, so the measurement
+        # command must not use it while the cut still may.
+        src = self.uneven_source()
+        real = sample_tool.subprocess
+        seen = []
+
+        class Spy:
+            def run(self, cmd, *args, **kwargs):
+                seen.append(cmd)
+                return real.run(cmd, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        with mock.patch.object(sample_tool, "subprocess", Spy()), \
+             mock.patch.object(sample_tool.wb, "subprocess", Spy()):
+            sample_tool.extract_segment(
+                src, self.root / "m.wav", 0.0, 1.0, loudnorm=True,
+                cfg=_cfg(loudnorm=True, loudnorm_mode="linear"))
+        measure = [cmd for cmd in seen if "print_format=json" in " ".join(cmd)]
+        self.assertEqual(len(measure), 1, msg="one measurement pass expected")
+        self.assertNotIn("-loglevel", " ".join(measure[0]),
+                         msg=f"measurement must not silence itself: {measure[0]!r}")
 
 
 if __name__ == "__main__":
