@@ -10,6 +10,7 @@ and atomic round-trip persistence via SPOTTYTUBE_SETTINGS.
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -408,6 +409,78 @@ class TestAdvancedSection(TempSettingsCase):
         for entry in st.sections_json():
             self.assertEqual(set(entry),
                              {"key", "label", "collapsible", "collapsed"})
+
+
+class TestReadmeSettingsSection(unittest.TestCase):
+    """The README's Settings section is the reference for anyone who never opens the panel.
+
+    ``tools/settings.py`` is the source of truth, so the section is checked
+    against it in both directions: a key added to the schema with no README
+    bullet leaves a real setting invisible to whoever reads the docs instead of
+    the gear panel, and a bullet left behind for a key the schema no longer
+    carries documents a knob that cannot be set. Grouping, order and the shown
+    default are pinned too: each bullet sits under its own section's heading, in
+    the schema's order, stating the value the schema ships.
+    """
+
+    README = Path(__file__).resolve().parent.parent / "README.md"
+    SECTION = "## Settings"
+    HEADING = re.compile(r"^### (?P<title>.+?)\s*$")
+    BULLET = re.compile(r"^- `(?P<key>[a-z0-9_]+)` \(`(?P<shown>[^`]*)`\)")
+
+    @staticmethod
+    def shown(field):
+        """The default as the README renders it: checkbox on/off, text quoted."""
+        if field["control"] == "checkbox":
+            return "on" if field["default"] else "off"
+        if field["control"] == "text":
+            return field["default"] or '""'
+        return str(field["default"])
+
+    def section_body(self):
+        text = self.README.read_text(encoding="utf-8")
+        parts = text.split("\n" + self.SECTION + "\n", 1)
+        self.assertEqual(len(parts), 2, "README.md has no '## Settings' section")
+        return parts[1].split("\n## ", 1)[0]
+
+    def groups(self):
+        """{heading: [(key, shown), ...]} for the section, in document order."""
+        out, current = {}, None
+        for line in self.section_body().splitlines():
+            heading = self.HEADING.match(line)
+            if heading:
+                current = out.setdefault(heading.group("title"), [])
+                continue
+            bullet = self.BULLET.match(line)
+            if bullet and current is not None:
+                current.append((bullet.group("key"), bullet.group("shown")))
+        return out
+
+    def test_every_schema_key_has_exactly_one_bullet(self):
+        bullets = [key for group in self.groups().values() for key, _ in group]
+        self.assertEqual(len(bullets), len(set(bullets)),
+                         "a key is documented twice in the Settings section")
+        self.assertEqual(set(bullets), set(st.KEYS),
+                         "the Settings section and tools/settings.py disagree")
+
+    def test_each_group_holds_exactly_its_own_section(self):
+        groups = self.groups()
+        labels = [label for _, label in st.SECTIONS]
+        self.assertEqual(sorted(groups), sorted(labels),
+                         "README groups and schema sections disagree")
+        for name, label in st.SECTIONS:
+            expected = [f["key"] for f in st.SCHEMA if f["section"] == name]
+            self.assertEqual([key for key, _ in groups[label]], expected,
+                             f"the '{label}' group does not list the {name} "
+                             "keys in schema order")
+
+    def test_every_bullet_states_the_default_the_schema_ships(self):
+        wanted = {field["key"]: self.shown(field) for field in st.SCHEMA}
+        for group in self.groups().values():
+            for key, shown in group:
+                with self.subTest(key=key):
+                    self.assertEqual(shown, wanted[key],
+                                     f"README shows '{shown}' for {key}")
 
 
 if __name__ == "__main__":

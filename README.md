@@ -120,7 +120,8 @@ pipeline needs no change).
 - **Gear button** opens the settings panel: every setting from
   `tools/settings.py` rendered from the schema the bridge serves (labels,
   controls, ranges, hover help). Save validates, stores and applies without a
-  restart. **Restart bridge service** at the bottom restarts the systemd unit
+  restart; **Settings** below writes the same list out in prose, with suggested
+  uses. **Restart bridge service** at the bottom restarts the systemd unit
   so the bridge reloads the code on disk — use it after editing bridge or tool
   code, since a running service keeps the build it started with. The panel
   waits for the service to come back and re-syncs, showing the new version.
@@ -136,99 +137,227 @@ down does not buy a longer selection — at 0.5x only 21 s of source fits in
 and re-timed at 1.5x when it is built. The widget, the bridge and the tool all
 refuse a range whose stored length is over 42 s.
 
-## Advanced audio settings
+## Settings
 
-The settings panel groups the pipeline controls under a collapsed
-**Advanced** heading (the gear panel, `tools/settings.py`). Every setting here
-defaults to a neutral value, with one intentional carve-out: `edge_fade`
-defaults to `declick`, which by design tapers the first and last few
-milliseconds of every cut. So the promise for a build with the defaults is
-that it adds **no extra ffmpeg pass** and is byte-identical to the single-cut
-build this tool has always made *apart from that edge taper*. One line per
-setting, its default, and what it costs:
+One JSON file holds every user-adjustable value:
+`~/.config/spottytube/settings.json` (`SPOTTYTUBE_SETTINGS` overrides the path).
+The gear panel is a view of it. The bridge serves the schema from
+`tools/settings.py` over `GET /settings` and validates whatever the panel posts
+back against that same schema, so the panel, the tool and this list cannot
+describe different things. Saving validates every value, stores the file
+atomically and applies it with no restart.
 
-**Edge fades** — on by default:
+Who reads a key, and when a change lands:
 
-- `edge_fade` (`declick`) — shapes the cut boundary so the loop does not click
-  where it joins. `declick` fades the first and last few milliseconds to kill
-  the click; `loop` fades both ends to match for a click-free wrap; `off`
-  leaves the cut raw and is the old behaviour.
-- `edge_fade_ms` (`5`) — fade length in milliseconds. The fade pair is
-  symmetric and equal length.
+- **tool** — `sample_tool.py` reads the file on every build, so a change takes
+  effect on the next Send to deck.
+- **widget** — the browser widget reads it for the next save, countdown tick or
+  fresh page: placement, transport, speed limits and countdown timing change
+  live.
+- **card** — written to `SK/config.txt` when you save with the SD card mounted;
+  the unit picks the values up at its next power-up with that card in.
+- **bridge** — read by the running bridge process and applied to the next job.
 
-**True-peak limiter** — off by default, costs **one extra ffmpeg pass**:
+Each key is listed with the value it ships, what it does, and when it is worth
+changing; the same words are the hover help in the panel. An empty text value
+means "use the built-in default".
 
-- `true_peak` (`off`) — when on, a final `alimiter` pass caps the sample's
-  peak. It runs as its **own pass after the cut is re-timed**, not inside the
-  cut, so it protects the stored file at every speed — including 1x, where the
-  re-time step is a plain copy and no ffmpeg runs at all. With it off the
-  default build spawns nothing extra.
-- `true_peak_dbtp` (`-1.0`) — the ceiling in dBTP; the limiter `limit` is its
-  linear form (`10 ** (dbtp / 20)`). The filter uses `level=off` so the result
-  is **only ever attenuated** to the ceiling — without `level=off` `alimiter`
-  auto-levels back up to full scale and the ceiling is lost.
-- **Match `loudnorm_tp` and `true_peak_dbtp`.** Loudnorm drives toward its own
-  `TP` (default `-1.5`); the limiter caps at `true_peak_dbtp` (default `-1.0`).
-  Two ceilings both apply and the tighter one wins, so a limiter set *looser*
-  than `loudnorm_tp` cannot undo loudnorm — but a limiter set *tighter* will
-  re-limit loudnorm's output. Set them to the same number and stop thinking
-  about it; nothing reconciles them for you.
+### Audio pipeline
 
-**Seek** — no extra pass either way:
+- `download_format` (`bestaudio`) — the yt-dlp format selector used when the
+  source is downloaded. m4a/AAC is usually the highest-quality audio a video
+  page offers, webm/Opus is the common alternative, and plain `bestaudio` lets
+  the downloader pick. Applies to the next download. Suggested: leave it unless
+  something downstream handles one of the containers badly.
+- `loudnorm` (`off`) — runs ffmpeg `loudnorm` inside the cut chain, so every
+  sample lands on the tape at the same perceived volume. One more stage in the
+  chain, not an extra ffmpeg run, and the dynamics of quiet passages survive at
+  the default target. Suggested: on when you tape sources of very different
+  loudness together, off when you are sampling one record or one video.
+- `loudnorm_i` (`-16.0`) — the integrated loudness target in LUFS, used when
+  `loudnorm` is on. Lower is quieter, higher is louder. Suggested: -16 for
+  music, -18 to -20 for speech you want to sit under other material.
+- `speed_method` (`atempo`) — how a rate other than 1x is baked into the
+  sample. `atempo` time-stretches and keeps the original pitch; `varispeed`
+  shifts pitch with the rate, like slowing a tape. Both produce the same
+  duration on the deck. Suggested: `atempo` for anything with a tune you want
+  to keep, `varispeed` when the pitch shift is the effect itself.
 
-- `cut_seek` (`fast`) — `fast` seeks by keyframe index and `accurate` decodes
-  to the exact frame. Accurate is slower but lands on the precise sample.
+### Save defaults
 
-**Loudness normalisation** — off by default; `linear` costs **one extra probe pass**:
+- `default_mode` (`append`) — where a new sample lands. `bump`: slot 1 of the
+  tape, with every occupied slot behind it moving one place down the
+  `B G P R T Y` chain and whatever falls off `Y/6` archived rather than deleted
+  (see Slot order). `append`: the first free slot, nothing moves. Suggested:
+  `append` while you are collecting samples, `bump` when you want the newest
+  one always first.
+- `default_tape` (`B`) — the tape the chain starts at. Tapes play in device
+  order `B G P R T Y`, six slots each; in `append` mode the first free slot on
+  any tape may take the sample, so this is a starting point rather than a hard
+  target. Suggested: set the tape you are working on.
+- `default_transport` (`auto`) — how samples reach the instrument. `auto` uses
+  USB when the unit answers and falls back to a mounted card; `usb` and `card`
+  force one path and fail instead of falling back. Suggested: leave `auto`;
+  force a path when you would rather see a failure than a silent fallback.
 
-- `loudnorm_mode` (`dynamic`) — `dynamic` applies `loudnorm` in one pass while
-  it measures and adjusts as it goes. `linear` measures the source first (an
-  extra ffmpeg pass reading the pass-1 JSON), then applies a fixed gain — no
-  pumping, but a second pass.
-- `loudnorm_tp` (`-1.5`) — the true-peak ceiling loudnorm targets.
-- `loudnorm_lra` (`11`) — the loudness-range target, in LU.
+### Widget
 
-**High-pass** — off by default, no extra pass:
+- `danger_seconds` (`5`) — how many seconds are left on the auto-end countdown
+  when it turns red and starts blinking. The countdown itself always spans the
+  deck's 42 s loop ceiling. Suggested: 5 is a fair warning; raise it if you
+  usually need to hear the end twice before deciding.
+- `flash_ms` (`500`) — the blink phase of the red countdown in milliseconds:
+  on for this long, off for this long. Suggested: 500 is a calm pulse, lower is
+  frantic.
+- `speed_min` (`0.25`) — the lower bound of the speed slider. The toolchain
+  accepts 0.25x-2x, so the slider can only be narrowed, never widened past that
+  envelope. Suggested: raise it above 0.5 to keep half-speed saves off the
+  tape.
+- `speed_max` (`2.0`) — the upper bound of the speed slider (hardware ceiling
+  2x). Suggested: lower it so an accidental fast save cannot land.
+- `speed_step` (`0.05`) — how much one notch of the slider changes the rate.
+  Suggested: 0.05 gives the whole 0.25x-2x range in the documented steps;
+  coarser steps cross it faster, finer steps reach exact rates.
+- `speed_default` (`1.0`) — the rate a fresh page settles on, inside the
+  minimum and maximum above. Snapping to the player overrides it until snap is
+  turned off. Suggested: 1.0 unless you almost always sample at one other rate.
 
-- `highpass` (`off`) — a leading high-pass that removes sub-audible rumble
-  before anything else in the chain.
-- `highpass_hz` (`30`) — the corner frequency.
+### Device (config.txt)
 
-**DC offset** — off by default; costs **one probe pass** when on:
+- `mid_ch_a` (`1`) — the MIDI channel deck A listens on, 1-16; it must differ
+  from deck B. Written to `SK/config.txt` when you save with the card mounted,
+  and the unit picks it up at its next power-up. Suggested: leave both channels
+  alone unless the unit shares a MIDI path with other gear.
+- `mid_ch_b` (`2`) — the MIDI channel deck B listens on, 1-16; it must differ
+  from deck A. Written the same way, picked up at the next power-up.
+- `mid_ps_a` (`off`) — lets MIDI Start/Stop messages control deck A playback.
+  Off means MIDI notes still trigger slices but transport messages are ignored.
+  Suggested: on when a DAW or a sequencer is driving the set.
+- `mid_ps_b` (`off`) — the same for deck B.
+- `pre_load` (`on`) — pre-loads sample audio into RAM so slices trigger
+  instantly. Suggested: leave it on unless a slow card makes loading click;
+  after changing it, power-cycle with the card in and load each slot once.
+- `slc_mn_a` (`off`) — deck A Slice mode: mono, no polyphony, so a newly
+  triggered slice cuts the previous one instead of layering over it. Suggested:
+  on when you want one-shots that do not smear into each other.
+- `slc_mn_b` (`off`) — the same for deck B.
 
-- `dc_shift` (`off`) — measures the source's DC offset (an extra ffmpeg
-  `astats` pass) and shifts it out. Off leaves the cut single-pass.
+### Bridge and paths
 
-**Resample / dither** — no extra pass, ever:
+- `tool_path` (`""`) — an override path to the sampling tool script (`.py`);
+  empty uses the tool bundled with this install. Applied to the next job, and a
+  path that does not exist is refused. Suggested: point it at a working copy
+  only while iterating on the tool.
+- `usb_port` (`""`) — forces the serial port used for USB transfers, for
+  example `/dev/ttyACM1`; empty auto-detects the Spotykach. Applied to the next
+  save without restarting the bridge. Suggested: set it when a second CDC
+  device makes auto-detection pick the wrong node.
+- `cache_dir` (`""`) — where downloads and cut segments are cached; empty uses
+  `~/.hermes/cache/spotykach`. Suggested: point it at a bigger disk if you
+  sample long sources; existing cache files are not moved.
 
-- `resampler` (`swr`) — `swr` (ffmpeg's built-in) or `soxr`. Only matters when
-  the source is not already 48 kHz; the output is **always 48 kHz stereo**.
-- `dither` (`none`) — dither added at the resample. The tool writes **float32**
-  WAVs, and dither is inert on float output: it is a no-op you will not hear on
-  the shipped files. Leave it at `none`; it exists for completeness.
+### Advanced
 
-**Silence trim** — off by default, no extra pass:
+The panel keeps these under a collapsed **Advanced** heading, because they
+change the audio and the panel is only so tall. All of them ship neutral, with
+one deliberate carve-out: `edge_fade` ships as `declick`, which by design tapers
+the first and last few milliseconds of every cut. So a default build adds **no
+extra ffmpeg pass** and is byte-identical to the single-cut build this tool has
+always made, apart from that edge taper.
 
-- `trim_silence` (`off`) — trims leading and trailing near-silence.
-- `trim_threshold_db` (`-50`) — what counts as silence for the trim.
+- `edge_fade` (`declick`) — shapes the cut boundary. Slicing through a loud
+  waveform leaves a step at each end that clicks on every trigger: `declick`
+  fades the first and last few milliseconds to kill it, `loop` fades both ends
+  so they match for a click-free wrap, and `off` leaves the cut raw, which is
+  the old behaviour. Suggested: leave `declick`, and reach for `loop` when the
+  sample is going to be looped rather than triggered once.
+- `edge_fade_ms` (`5`) — the fade length in milliseconds, symmetric at both
+  ends. 5 ms is inaudible on a transient and enough to remove the click; longer
+  settings soften the attack noticeably. Suggested: leave it at 5, and use
+  `trim_silence` instead when the problem is a noisy start.
+- `true_peak` (`off`) — a final `alimiter` pass over the re-timed sample, so
+  peaks pushed past full scale by the speed change cannot clip on the deck. It
+  runs as its own pass **after** the re-time rather than inside the cut, so it
+  protects the stored file at every rate, including 1x where the re-time is a
+  plain copy and no ffmpeg runs at all. Suggested: on when you save at rates
+  away from 1x and hear the deck distort.
+- `true_peak_dbtp` (`-1.0`) — the limiter ceiling in dB below full scale. The
+  filter's `limit` is the linear form (`10 ** (dbtp / 20)`), and it runs with
+  `level=off`, so the result is only ever attenuated to the ceiling and never
+  lifted back up. Suggested: set it to `loudnorm_tp` and leave it there.
+- `cut_seek` (`fast`) — how ffmpeg seeks to the cut start. `fast` jumps to the
+  nearest keyframe and decodes forward, which is quick on a long source;
+  `accurate` decodes from the file start and lands frame-exact, at a cost
+  proportional to where the range sits. Both are safe: the de-click tapers
+  follow the clock the cut actually lands on. Suggested: leave `fast`, and use
+  `accurate` only when a range has to land on an exact frame.
+- `loudnorm_tp` (`-1.5`) — loudnorm's true-peak ceiling in dBTP, used when
+  `loudnorm` is on. -1.5 leaves headroom for lossy playback; 0 allows full
+  scale.
+- `loudnorm_lra` (`11`) — loudnorm's loudness-range target in LU, used when
+  `loudnorm` is on. 11 suits music and keeps its dynamics; smaller numbers
+  flatten quiet passages. Suggested: lower it towards 8 when you want a quiet
+  intro pulled up.
+- `loudnorm_mode` (`dynamic`) — `dynamic` levels while it measures, in a single
+  pass; `linear` measures the cut first and then applies a fixed gain, which is
+  more predictable and costs the one extra ffmpeg run in this group. Used when
+  `loudnorm` is on. Suggested: `dynamic` for one-offs, `linear` for a batch you
+  want to match.
+- `highpass` (`off`) — a high-pass before the re-time, dropping rumble and
+  handling noise below the cutoff. The deck cannot reproduce deep sub-bass, so
+  this frees headroom for what it can. Suggested: on for vinyl rips, phone
+  recordings and anything with traffic or air-conditioning in the room.
+- `highpass_hz` (`30`) — the cutoff in Hz. 30 removes rumble without touching
+  musical bass; raise it for speech or a noisy recording. Suggested: 30 for
+  music, 80 to 120 for voice.
+- `dc_shift` (`off`) — measures the cut's DC offset and shifts it out before
+  the re-time. An offset eats headroom and shows up as a click at the
+  cut edges; the measurement is one short `astats` probe. Suggested: on when a
+  source clicks at both edges no matter how the fades are set.
+- `resampler` (`swr`) — the resampler used when the sample rate has to change.
+  `swr` is ffmpeg's own and is always there; `soxr` is higher quality when this
+  ffmpeg was built with it, and is rejected loudly when it was not. The output
+  is always 48 kHz stereo float32. Suggested: leave `swr`; `soxr` only matters
+  when the source is not already 48 kHz.
+- `dither` (`none`) — dither added while resampling. `triangular` is the usual
+  choice when the bit depth drops and `triangular_hp` pushes that noise above
+  the audible band, but the deck takes 32-bit float, so left at `none` the
+  resample stays transparent in the ways that matter here. Suggested: leave it
+  at `none`; it exists for completeness.
+- `trim_silence` (`off`) — trims leading and trailing near-silence before the
+  re-time, so the sample starts on its first sound. It uses a peak threshold
+  rather than a gate, so quiet material can be trimmed when it sits below the
+  threshold. Suggested: on when the range you picked opens with dead air.
+- `trim_threshold_db` (`-50`) — what counts as silence for the edge trim, in
+  dB. -50 ignores room tone; raise it towards -30 for hissier sources. Used
+  when `trim_silence` is on. Suggested: leave -50 unless a hiss survives at the
+  head of the trim.
+- `noise_reduction` (`off`) — denoise before the re-time, for tape hiss, room
+  noise or broadband hum. One more filter stage in the cut chain, and it can
+  dull bright material. Suggested: on for a noisy source you cannot re-record,
+  and listen to one sample before taping a batch.
+- `nr_method` (`afftdn`) — which denoiser to use. `afftdn` is ffmpeg's spectral
+  denoiser and needs no external files; `arnndn` is rnnoise, better on speech
+  but it needs the model below. Used when `noise_reduction` is on. Suggested:
+  `afftdn` for hiss and hum, `arnndn` for voice with a model in place.
+- `nr_model` (`""`) — the `.rnnn` model that `arnndn` loads. Left blank, a
+  build with `arnndn` selected stops with a clear error rather than guessing at
+  a model; a path that does not load fails loudly inside ffmpeg instead of
+  passing the audio through untouched. The tool never downloads a model for
+  you. Suggested: leave it blank while `nr_method` is `afftdn`, which needs no
+  file at all.
 
-**Noise reduction** — off by default, no extra pass:
-
-- `noise_reduction` (`off`) — a denoiser that runs after the DC shift and
-  before the silence trim.
-- `nr_method` (`afftdn`) — `afftdn` is ffmpeg's own FFT denoiser and is used
-  with no parameters. `arnndn` is the rnnoise method and **needs a model
-  file**.
-- `nr_model` (`""`) — the `.rnnn` rnnoise model for `arnndn`. It is required
-  whenever `nr_method` is `arnndn`: with it blank the build refuses up front
-  with a clear error, and a path that does not load fails loudly inside ffmpeg
-  (a non-zero exit surfaced as an error) rather than passing the audio through
-  untouched. The tool never downloads a model for you.
+**Match `loudnorm_tp` and `true_peak_dbtp`.** Loudnorm drives toward its own TP
+(default `-1.5`) and the limiter caps at `true_peak_dbtp` (default `-1.0`). Two
+ceilings both apply and the tighter one wins, so a limiter set *looser* than
+`loudnorm_tp` cannot undo loudnorm, while one set *tighter* will re-limit
+loudnorm's output. Set them to the same number and stop thinking about it;
+nothing reconciles them for you.
 
 The chain order is fixed: `highpass → dcshift → <noise reduction> →
 silenceremove → afade → loudnorm → aresample`, and the true-peak limiter runs
-afterwards as its own final pass. Each setting that needs a pass costs wall
-time proportional to the sample, so a default build stays the quick one.
+afterwards as its own final pass. Each setting that needs a pass costs wall time
+proportional to the sample, so a default build stays the quick one.
 
 ## Slot order
 
@@ -290,27 +419,49 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 173 python tests
+    python3 -m unittest discover -s tests -t . -v       # 277 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 72 widget tests
+                tests/test_widget_wiring.mjs            # 75 widget tests
 
 `-t .` matters: without it the modules import top-level and `tests/__init__.py`
 never runs, so the suite reads your real settings file instead of the pinned
 temp path. Test modules import as `tests.test_x` on purpose.
 
+- `tests/test_audio_chain.py` — 53 tests: the pure `-af` filter builder
+  (`tools/audio_chain.py`) with no ffmpeg in sight, so a change to the chain
+  order (highpass, dc-shift, denoise, trim, fades, loudnorm, resample) or to
+  a flag fails here instead of only showing up as a quietly different WAV.
+  Pins the neutral build reproducing the legacy hardcode, the arnndn model
+  refusal, the true-peak limiter staying out of the cut chain, and the
+  de-click anchors following the filter graph's clock origin (a taper left on
+  a 0-based clock under an accurate seek zeroes the whole cut). The
+  real-ffmpeg behaviour of these filters lives in `tests/test_sample_tool.py`.
 - `tests/test_bridge.py` — 40 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
-- `tests/test_settings.py` — 39 tests: every schema field carries hover help
+- `tests/test_settings.py` — 42 tests: every schema field carries hover help
   and its constraints, a missing/corrupt/partial file degrades to defaults per
   key, validation enforces select choices, number ranges and cross-field rules
   (speed envelope, MIDI channels differ, `tool_path` ends in `.py`), saves are
-  atomic round-trips, and `SPOTTYTUBE_SETTINGS` overrides the path.
-- `tests/test_sample_tool.py` — 68 tests: time parsing, generic source ids,
+  atomic round-trips, and `SPOTTYTUBE_SETTINGS` overrides the path. Three of
+  them read the README back: every schema key has exactly one bullet in
+  `## Settings`, each key sits under its own schema section and default, so the
+  prose and the panel cannot drift apart.
+- `tests/test_stdlib_only.py` — 2 tests: an AST scan proving every `.py`
+  under `tools/` and `bridge/` imports only the standard library (or a
+  sibling first-party module by bare stem), with non-vacuity floors so a
+  scan that walked nothing fails instead of passing forever, plus a tree
+  walk that fails on `package.json`, `node_modules/` or a `jsdom` reference
+  so the node harness stays plain `node --test`.
+- `tests/test_sample_tool.py` — 114 tests: time parsing, generic source ids,
   transport choice, and placement on the tape chain against a real directory
   tree (bump cascades across tapes, append finds the first free slot, only a
   full Y/6 archives to the card root, read-back check, partial tapes), plus
-  the speed cut, measured by decoding the WAVs ffmpeg actually produced.
+  the speed cut, measured by decoding the WAVs ffmpeg actually produced. The
+  cut pass is decoded and measured too: the de-click taper landing on the
+  first and last samples, the default chain matching the legacy cut byte for
+  byte, and an accurate seek over a real opus/webm source keeping its audio
+  instead of producing digital silence (which the guard refuses).
 - `tests/test_install_browsers.py` — 20 tests: browser detection and filtering
   run under a throwaway PATH of stub executables, so no browser on the machine
   leaks into a result and no root is needed. Covers native, snap and Flatpak
@@ -329,7 +480,8 @@ temp path. Test modules import as `tests.test_x` on purpose.
   range, the snap control, `speed` in the sample payload, `playbackRate`
   polling, persistence, the countdown wiring (arm on in-point, auto
   out-point on elapse, flash classes, teardown), the settings panel (row
-  labels bound to controls, collapsible sections, an expanded group scrolling
+  labels bound to controls, a select with no stored value falling back to the
+  schema's `default`, collapsible sections, an expanded group scrolling
   with the scrollbar hidden, pinned footer, viewport clamp) and the restart
   flow (worker posts `/restart`, waits for health, re-syncs).
 
@@ -359,6 +511,12 @@ restart that browser completely.
 
 `PermissionError` on `/recovery`: system vfat mounts that cannot be read are
 skipped instead of aborting the card scan.
+
+"is digital silence (every sample zero)": the cut came out the right length but
+with no audio in it, so it is refused instead of travelling to the deck (a
+silent sample looks like a build that worked). Check the source range first;
+if the source is audible there, the fault is the cut filters. This is how the
+`cut_seek: accurate` + edge-fade bug shows up in old logs.
 
 ## Layout
 
