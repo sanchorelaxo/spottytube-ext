@@ -92,6 +92,35 @@ class TestSilenceTrim(unittest.TestCase):
     def test_trim_off_adds_nothing(self):
         self.assertNotIn("silenceremove", ac.cut_filters(cfg(), 5.0))
 
+    def test_trim_on_fades_in_the_reversed_domain(self):
+        # With the trim on, silenceremove shortens the stream first, so a
+        # fade-out anchored to the requested length (st=seconds-d) would start
+        # past the shortened end and never taper. The tail fade is therefore
+        # done inside the reverse pair, where afade=t=in *is* a fade-out at the
+        # true end of the trimmed stream.
+        self.assertEqual(
+            ac.cut_filters(cfg(trim_silence=True), 10.0),
+            "silenceremove=start_periods=1:detection=peak:start_threshold=-50dB,"
+            "afade=t=in:st=0:d=0.005,areverse,"
+            "silenceremove=start_periods=1:detection=peak:start_threshold=-50dB,"
+            "afade=t=in:st=0:d=0.005,areverse")
+
+    def test_trim_on_loop_uses_the_loop_fade_in_the_reversed_domain(self):
+        self.assertEqual(
+            ac.cut_filters(
+                cfg(trim_silence=True, edge_fade="loop", edge_fade_ms=20), 10.0),
+            "silenceremove=start_periods=1:detection=peak:start_threshold=-50dB,"
+            "afade=t=in:st=0:d=0.02,areverse,"
+            "silenceremove=start_periods=1:detection=peak:start_threshold=-50dB,"
+            "afade=t=in:st=0:d=0.02,areverse")
+
+    def test_trim_on_with_fade_off_still_trims_without_a_fade(self):
+        out = ac.cut_filters(cfg(trim_silence=True, edge_fade="off"), 10.0)
+        self.assertEqual(out.count("silenceremove"), 2)
+        self.assertNotIn("afade", out)
+        self.assertFalse(out.startswith(","))          # no stray commas
+        self.assertNotIn(",,", out)
+
 
 class TestOrder(unittest.TestCase):
     def test_chain_order_is_highpass_dc_trim_fade(self):

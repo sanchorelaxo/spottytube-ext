@@ -880,6 +880,33 @@ class TestCutPassChain(unittest.TestCase):
         self.assertGreater(got, 0.3)     # not empty
         self.assertLess(got, 0.75)       # genuinely shorter than the request
 
+    def test_trim_on_lands_the_fade_out_on_the_true_end(self):
+        # Leading AND trailing silence around a loud block, trimmed and
+        # de-clicked. silenceremove shortens the stream before the tail fade,
+        # so a fade-out anchored to the requested length (st=seconds-d) would
+        # start past the shortened end and never taper. The fade must land on
+        # the trimmed stream's real end: the last samples must fall to silence.
+        def gen(i):
+            t = i / 48000.0
+            v = 0.5 if 0.2 <= t < 0.8 else 0.0
+            return (v, v)
+        src = self.root / "edges.wav"
+        src.write_bytes(_float_wav(gen, 1.0))
+        dst = self.root / "tapered.wav"
+        sample_tool.extract_segment(
+            src, dst, 0.0, 1.0,
+            cfg=_cfg(trim_silence=True, trim_threshold_db=-50,
+                     edge_fade="declick", edge_fade_ms=5))
+        samples = _frames(dst)
+        trimmed = len(samples) / 48000.0
+        window = int(0.001 * 48000)                  # the last 1 ms
+        tail_peak = max(abs(x) for x in samples[-window:])
+        print(f"\n[edge-fade] trimmed={trimmed:.4f}s "
+              f"last_sample={samples[-1]:.4f} tail_peak={tail_peak:.4f}")
+        self.assertLess(trimmed, 0.9)                # genuinely shorter
+        self.assertLess(abs(samples[-1]), 0.05)      # ends at silence
+        self.assertLess(tail_peak, 0.2)              # the taper really landed
+
     def test_start_past_the_end_still_raises_with_trim_on(self):
         src = self.source(seconds=1.0)
         dst = self.root / "past.wav"
@@ -898,7 +925,11 @@ class TestCutPassChain(unittest.TestCase):
             sample_tool.extract_segment(src, dst, 30.0, 1.0,
                                         cfg=_cfg(edge_fade="off"))
 
-    def test_default_path_spawns_one_pass_and_dc_adds_the_probe(self):
+    def test_default_path_adds_no_dc_probe_and_dc_shift_adds_one(self):
+        # Patch both sample_tool.subprocess and wb.convert's own module, so the
+        # count is every spawn of the cut pipeline, not one module's view of
+        # it. The contract: the default path runs the cut and the re-header
+        # convert only, with no astats probe; dc_shift adds exactly one probe.
         src = self.source()
         real = sample_tool.subprocess
 
@@ -914,17 +945,62 @@ class TestCutPassChain(unittest.TestCase):
                 return getattr(real, name)
 
         defaults = Spy()
-        with mock.patch.object(sample_tool, "subprocess", defaults):
+        with mock.patch.object(sample_tool, "subprocess", defaults), \
+             mock.patch.object(sample_tool.wb, "subprocess", defaults):
             sample_tool.extract_segment(src, self.root / "d.wav", 0.0, 0.5,
                                         cfg=_cfg())
-        self.assertEqual(len(defaults.calls), 1)         # one cut, no probe
+        # cut + wb.convert, and no DC probe.
+        self.assertEqual(len(defaults.calls), 2)
+        self.assertFalse(any("astats" in cmd for cmd in defaults.calls))
 
         probed = Spy()
-        with mock.patch.object(sample_tool, "subprocess", probed):
+        with mock.patch.object(sample_tool, "subprocess", probed), \
+             mock.patch.object(sample_tool.wb, "subprocess", probed):
             sample_tool.extract_segment(src, self.root / "p.wav", 0.0, 0.5,
                                         cfg=_cfg(dc_shift=True))
-        self.assertEqual(len(probed.calls), 2)           # probe + cut
-        self.assertTrue(any("astats" in cmd for cmd in probed.calls))
+        # probe + cut + wb.convert.
+        self.assertEqual(len(probed.calls), 3)
+        self.assertEqual(
+            sum(1 for cmd in probed.calls if "astats" in cmd), 1)   # one probe
+
+
+class TestDcProbeFailure(unittest.TestCase):
+    """A failed DC measurement must raise, not silently drop the shift.
+
+    The user opted in to ``dc_shift``; if the offset cannot be measured the cut
+    pass raises like it does for any other ffmpeg failure, rather than quietly
+    leaving the shift off.
+    """
+
+    class _RunStub:
+        def __init__(self, returncode=0, stderr="", stdout=""):
+            self.returncode = returncode
+            self.stderr = stderr
+            self.stdout = stdout
+
+    def test_probe_command_failure_names_the_setting(self):
+        with mock.patch.object(
+                sample_tool.subprocess, "run",
+                return_value=self._RunStub(1, "ffmpeg: bad input")):
+            with self.assertRaises(RuntimeError) as caught:
+                sample_tool._probe_dc_offset(Path("x.wav"), 0.0, 0.5)
+        message = str(caught.exception)
+        self.assertIn("dc_shift", message)
+        self.assertIn("probe", message)              # distinct from the parse case
+
+    def test_missing_dc_offset_line_names_the_setting(self):
+        with self.assertRaises(RuntimeError) as caught:
+            sample_tool._overall_dc_offset(
+                "Overall\n[Parsed_astats_0 @ 0x1] Peak level dB: -1.0\n")
+        message = str(caught.exception)
+        self.assertIn("dc_shift", message)
+        self.assertIn("DC offset", message)
+
+    def test_parsed_offset_is_still_returned(self):
+        stderr = ("[Parsed_astats_0 @ 0x1] Overall\n"
+                  "[Parsed_astats_0 @ 0x1] DC offset: 0.012345\n"
+                  "[Parsed_astats_0 @ 0x1] Peak level dB: -6.0\n")
+        self.assertAlmostEqual(sample_tool._overall_dc_offset(stderr), 0.012345)
 
 
 if __name__ == "__main__":

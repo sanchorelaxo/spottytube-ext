@@ -592,8 +592,9 @@ def _overall_dc_offset(stderr):
     """Pull the mean DC offset out of ffmpeg ``astats`` stderr.
 
     The value lives in the ``Overall`` block, labelled exactly
-    ``DC offset: <float>``. Returns 0.0 when the block or line is missing, so a
-    failed parse leaves the DC shift off rather than corrupting the cut.
+    ``DC offset: <float>``. Raises :class:`RuntimeError` when the block or the
+    line is missing rather than returning 0.0: ``dc_shift`` was turned on
+    deliberately, and a silent zero would leave it doing nothing.
     """
     lines = stderr.splitlines()
     overall = -1
@@ -601,21 +602,32 @@ def _overall_dc_offset(stderr):
         if line.rstrip().endswith("Overall"):
             overall = i
     if overall < 0:
-        return 0.0
+        raise RuntimeError(
+            "dc_shift: ffmpeg astats output carried no Overall block, so the "
+            "DC offset could not be measured"
+        )
     for line in lines[overall + 1:]:
         if "DC offset:" in line:
             try:
                 return float(line.split("DC offset:", 1)[1].strip())
             except ValueError:
-                return 0.0
-    return 0.0
+                raise RuntimeError(
+                    "dc_shift: ffmpeg astats output carried no parseable "
+                    f"DC offset line ({line.strip()!r})"
+                ) from None
+    raise RuntimeError(
+        "dc_shift: ffmpeg astats output carried no DC offset line, so the "
+        "offset could not be measured"
+    )
 
 
 def _probe_dc_offset(src, start, seconds):
     """Measure the source's mean DC offset over the cut range (one pass).
 
     Spawned only when :func:`audio_chain.needs_dc_probe` is true, so the
-    default path never grows a second ffmpeg pass.
+    default path never grows a second ffmpeg pass. A failed probe raises
+    :class:`RuntimeError` naming ``dc_shift`` rather than returning 0.0, which
+    would silently leave the shift off.
     """
     cmd = [
         wb.ffmpeg(), "-hide_banner",
@@ -624,7 +636,10 @@ def _probe_dc_offset(src, start, seconds):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        return 0.0
+        raise RuntimeError(
+            "dc_shift: the ffmpeg astats probe failed "
+            f"({result.stderr.strip()})"
+        )
     return _overall_dc_offset(result.stderr)
 
 
