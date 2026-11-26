@@ -324,7 +324,7 @@ class TestAdvancedSection(TempSettingsCase):
         "true_peak", "true_peak_dbtp",
         "cut_seek",
         "loudnorm_tp", "loudnorm_lra", "loudnorm_mode",
-        "highpass", "highpass_hz", "dc_shift",
+        "highpass", "highpass_hz", "lowpass", "lowpass_hz", "dc_shift",
         "resampler", "dither",
         "trim_silence", "trim_threshold_db",
         "noise_reduction", "nr_method", "nr_model",
@@ -335,7 +335,8 @@ class TestAdvancedSection(TempSettingsCase):
         "true_peak": False, "true_peak_dbtp": -1.0,
         "cut_seek": "fast",
         "loudnorm_tp": -1.5, "loudnorm_lra": 11, "loudnorm_mode": "dynamic",
-        "highpass": False, "highpass_hz": 30, "dc_shift": False,
+        "highpass": False, "highpass_hz": 30, "lowpass": False, "lowpass_hz": 3000,
+        "dc_shift": False,
         "resampler": "swr", "dither": "none",
         "trim_silence": False, "trim_threshold_db": -50,
         "noise_reduction": False, "nr_method": "afftdn", "nr_model": "",
@@ -387,11 +388,13 @@ class TestAdvancedSection(TempSettingsCase):
 
     def test_bad_values_name_the_field(self):
         _, errors = st.validate({"edge_fade": "declik", "loudnorm_lra": 99,
-                                 "highpass_hz": 900}, base=st.defaults())
+                                 "highpass_hz": 900, "lowpass_hz": 25000},
+                                base=st.defaults())
         joined = " ".join(errors)
         self.assertIn("edge_fade must be one of", joined)
         self.assertIn("loudnorm_lra must be between 1 and 50", joined)
         self.assertIn("highpass_hz must be between 0 and 200", joined)
+        self.assertIn("lowpass_hz must be between 100 and 20000", joined)
 
     def test_sections_json_marks_advanced_collapsed(self):
         entries = st.sections_json()

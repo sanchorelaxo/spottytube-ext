@@ -396,6 +396,26 @@ class TestNoiseReduction(unittest.TestCase):
         out = self.chain(noise_reduction=False, nr_method="arnndn")
         self.assertNotIn("arnndn", out, msg=f"chain was {out!r}")
 
+    def test_lowpass_pairs_with_the_highpass_into_a_band(self):
+        out = ac.cut_filters(cfg(highpass=True, highpass_hz=200,
+                                 lowpass=True, lowpass_hz=3000), 5.0)
+        self.assertIn("highpass=f=200", out, msg=f"chain was {out!r}")
+        self.assertIn("lowpass=f=3000", out, msg=f"chain was {out!r}")
+        self.assertLess(out.index("highpass=f=200"), out.index("lowpass=f=3000"),
+                        msg=f"low-pass must follow the high-pass: {out!r}")
+
+    def test_lowpass_off_adds_no_term(self):
+        out = ac.cut_filters(cfg(lowpass=False, lowpass_hz=3000), 5.0)
+        self.assertNotIn("lowpass", out, msg=f"chain was {out!r}")
+
+    def test_an_inverted_band_is_not_second_guessed(self):
+        # 4 kHz under a 5 kHz high-pass removes everything. The builder writes
+        # what it was told, exactly as it does for a model path.
+        out = ac.cut_filters(cfg(highpass=True, highpass_hz=5000,
+                                 lowpass=True, lowpass_hz=4000), 5.0)
+        self.assertIn("highpass=f=5000", out, msg=f"chain was {out!r}")
+        self.assertIn("lowpass=f=4000", out, msg=f"chain was {out!r}")
+
 
 class TestFinalLimiter(unittest.TestCase):
     """``final_filters``: the post-retime true-peak limiter term, or ``None``.

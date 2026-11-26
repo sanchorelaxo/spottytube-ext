@@ -9,12 +9,17 @@ are unit-testable without spawning a process.
 
 The filter order is fixed and meaningful::
 
-    highpass -> dcshift -> <NR> -> silenceremove -> afade -> loudnorm -> aresample
+    highpass -> lowpass -> dcshift -> <NR> -> silenceremove -> afade -> loudnorm -> aresample
 
 * ``highpass`` removes sub-audible rumble first, so what follows — most
   visibly the ``silenceremove`` threshold — sees the high-passed signal. It
   does not touch the DC measurement: that probe runs on the raw source before
   the chain and never sees this filter.
+* ``lowpass`` follows the high-pass and pairs with it into a band, so the two
+  together keep the range a voice lives in (``highpass=f=200,lowpass=f=3000``)
+  and drop the rumble below and the hiss above. Off by default, so the default
+  chain is unchanged; the builder writes the numbers it was told and never
+  second-guesses an inverted band.
 * ``dcshift`` removes any constant offset that survived.
 * ``<NR>`` (noise reduction) is optional and sits right after the DC shift and
   before the silence trim, so the trim threshold sees a denoised signal. It is
@@ -160,6 +165,13 @@ def loudnorm_filter(cfg, loudnorm=None, loudnorm_i=None, measured=None):
 def _highpass(cfg):
     if cfg["highpass"] and float(cfg["highpass_hz"]) > 0:
         return f"highpass=f={float(cfg['highpass_hz']):g}"
+    return None
+
+
+def _lowpass(cfg) -> str | None:
+    """The low-pass term, or None when it is off (0 Hz counts as off)."""
+    if cfg.get("lowpass") and float(cfg.get("lowpass_hz") or 0) > 0:
+        return f"lowpass=f={float(cfg['lowpass_hz']):g}"
     return None
 
 
@@ -353,7 +365,8 @@ def cut_filters(cfg, seconds, dc_offset=0.0, loudnorm=None, loudnorm_i=None,
     chain, after loudnorm. The noise-reduction term (:func:`_noise_reduction`)
     sits after ``dcshift`` and before the silence trim.
     """
-    parts = [_highpass(cfg), _dc_shift(cfg, dc_offset), _noise_reduction(cfg)]
+    parts = [_highpass(cfg), _lowpass(cfg), _dc_shift(cfg, dc_offset),
+             _noise_reduction(cfg)]
     trim = _silence_trim(cfg)
     if trim:
         # Trim the head, fade the head, then one reverse pair that trims the

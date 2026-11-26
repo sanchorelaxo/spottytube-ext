@@ -383,6 +383,23 @@ SCHEMA = [
                 "Only used when High-pass rumble is on.",
     },
     {
+        "key": "lowpass", "section": "advanced", "scope": "tool",
+        "label": "Low-pass filter", "control": "checkbox",
+        "default": False,
+        "help": "Cut everything above the low-pass cutoff. With the "
+                "high-pass this makes a band: 200 Hz and 3 kHz leaves "
+                "the range a voice lives in.",
+    },
+    {
+        "key": "lowpass_hz", "section": "advanced", "scope": "tool",
+        "label": "Low-pass cutoff (Hz)", "control": "number",
+        "min": 100, "max": 20000, "step": 100,
+        "default": 3000,
+        "help": "Where the low-pass starts cutting, in Hz. 3000 keeps "
+                "speech and drops the hiss above it. Ignored while the "
+                "low-pass is off.",
+    },
+    {
         "key": "dc_shift", "section": "advanced", "scope": "tool",
         "label": "Remove DC offset", "control": "checkbox",
         "default": False,

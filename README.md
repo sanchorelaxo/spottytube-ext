@@ -310,6 +310,13 @@ always made, apart from that edge taper.
 - `highpass_hz` (`30`) — the cutoff in Hz. 30 removes rumble without touching
   musical bass; raise it for speech or a noisy recording. Suggested: 30 for
   music, 80 to 120 for voice.
+- `lowpass` (`off`) — cut everything above the low-pass cutoff. With the
+  high-pass this makes a band: 200 Hz and 3 kHz leaves the range a voice lives
+  in. Suggested: on alongside the high-pass for speech, phone recordings and
+  anything with a hiss above the voice.
+- `lowpass_hz` (`3000`) — where the low-pass starts cutting, in Hz. 3000 keeps
+  speech and drops the hiss above it, and is ignored while the low-pass is off.
+  Suggested: leave 3000 for voice, and raise it when speech sounds muffled.
 - `dc_shift` (`off`) — measures the cut's DC offset and shifts it out before
   the re-time. An offset eats headroom and shows up as a click at the
   cut edges; the measurement is one short `astats` probe. Suggested: on when a
@@ -354,7 +361,7 @@ ceilings both apply and the tighter one wins, so a limiter set *looser* than
 loudnorm's output. Set them to the same number and stop thinking about it;
 nothing reconciles them for you.
 
-The chain order is fixed: `highpass → dcshift → <noise reduction> →
+The chain order is fixed: `highpass → lowpass → dcshift → <noise reduction> →
 silenceremove → afade → loudnorm → aresample`, and the true-peak limiter runs
 afterwards as its own final pass. Each setting that needs a pass costs wall time
 proportional to the sample, so a default build stays the quick one.
