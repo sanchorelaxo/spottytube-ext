@@ -406,3 +406,31 @@ test("the speech shortcut sets the band, never posts itself", () => {
   // without this loop the box goes stale and claims a band that is not set.
   assert.match(src, /boxes\[key\]\.addEventListener\("change", sync\)/);
 });
+
+// Save closes the panel on success, exactly like Cancel, and reports the card
+// note on the main status line instead of inside the (now gone) panel. Greps
+// the SHIPPED saveSettings body so dropping the close or the status line fails
+// here rather than only in a browser.
+test("a successful save leaves the panel like cancelling does", () => {
+  const src = extract("saveSettings");
+  // The panel closes on success...
+  assert.match(src, /closeSettings\(\)/);
+  // ...exactly once, and only after the failed-save branch has already
+  // returned: a rejected save must keep the panel (with its error text) open.
+  assert.equal((src.match(/closeSettings\(\)/g) || []).length, 1);
+  const failReturn = src.indexOf("if (!reply.ok)");
+  assert.ok(failReturn !== -1, "the failure branch must stay in saveSettings");
+  assert.ok(src.indexOf("closeSettings()") > failReturn,
+    "closeSettings() must sit after the failed-save return");
+  // The card note no longer goes into the panel...
+  assert.doesNotMatch(src, /setSMsg\(msg/);
+  // ...it is the status line message, warn-styled when the card has a caveat.
+  assert.match(src, /setStatus\(message, kind\)/);
+  assert.match(src, /message = card\.error \|\| card\.warning/);
+  assert.match(src, /kind = "warn"/);
+  // An unchanged save carries no card_config at all, so the read must tolerate
+  // its absence.
+  assert.match(src, /reply\.card_config \|\| \{\}/);
+  // A written card says so on the status line.
+  assert.match(src, /config\.txt written/);
+});

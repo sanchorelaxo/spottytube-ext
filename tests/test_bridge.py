@@ -72,6 +72,15 @@ class ServerCase(unittest.TestCase):
 class TestSettingsPayload(ServerCase):
     """/settings is what the panel renders from: schema plus section hints."""
 
+    def setUp(self):
+        super().setUp()
+        self._visible_card = bridge.visible_card
+        bridge.visible_card = lambda: None
+
+    def tearDown(self):
+        bridge.visible_card = self._visible_card
+        super().tearDown()
+
     def test_sections_carry_the_collapse_hints(self):
         status, body, _ = self.request("/settings")
         self.assertEqual(status, 200)
@@ -87,6 +96,53 @@ class TestSettingsPayload(ServerCase):
         self.assertTrue({field["section"] for field in body["schema"]} <= announced)
         self.assertEqual([entry["key"] for entry in body["sections"]],
                          [key for key, _ in bridge.app_settings.SECTIONS])
+
+    def test_a_save_that_changes_no_device_value_leaves_the_card_alone(self):
+        # The panel posts every field, device keys included and unchanged: that
+        # is not a reason to rewrite SK/config.txt, and not a reason to nag.
+        _, body, _ = self.request("/settings")
+        status, reply, _ = self.request("/settings", method="POST", body=body["settings"])
+        self.assertEqual(status, 200)
+        self.assertTrue(reply["ok"], msg=reply)
+        self.assertNotIn("card_config", reply)
+
+    def test_a_changed_device_value_raises_the_note_once(self):
+        _, body, _ = self.request("/settings")
+        # The pinned settings file is shared for the whole run, so pick a
+        # channel that differs from whatever is stored right now: the test must
+        # not depend on the file's prior contents or on test order. Either 3 or
+        # 4 also keeps the cross-check happy (both differ from mid_ch_b=2).
+        stored = body["settings"]["mid_ch_a"]
+        values = dict(body["settings"], mid_ch_a=3 if stored != 3 else 4)
+        _, first, _ = self.request("/settings", method="POST", body=values)
+        self.assertIn("card_config", first)
+        self.assertIn("no card", first["card_config"]["warning"])
+        _, second, _ = self.request("/settings", method="POST", body=values)
+        self.assertNotIn("card_config", second)
+
+    def test_an_unchanged_save_leaves_the_card_file_alone(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "SK").mkdir()
+            bridge.visible_card = lambda: root
+            _, body, _ = self.request("/settings")
+            self.request("/settings", method="POST", body=body["settings"])
+            self.assertFalse((Path(root) / "SK" / "config.txt").exists(),
+                             msg="an unchanged save rewrote the card")
+
+    def test_a_changed_device_value_with_a_card_writes_it(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "SK").mkdir()
+            bridge.visible_card = lambda: root
+            _, body, _ = self.request("/settings")
+            # Same order-independence as above: differ from what is stored now.
+            stored = body["settings"]["mid_ch_a"]
+            values = dict(body["settings"], mid_ch_a=3 if stored != 3 else 4)
+            _, reply, _ = self.request("/settings", method="POST", body=values)
+        written = reply["card_config"]["written"]
+        self.assertTrue(written, msg=reply)
+        self.assertTrue(written.endswith("SK/config.txt"), msg=written)
 
 
 class TestParsing(unittest.TestCase):

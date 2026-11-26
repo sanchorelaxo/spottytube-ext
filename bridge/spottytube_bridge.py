@@ -528,14 +528,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"ok": False, "error":
                              f"tool_path {tool_path!r} is not an existing file"})
             return
+        # Read the stored values before save() overwrites the file: the panel
+        # posts every field it renders, so "posted" is not "changed", and only
+        # a real change to a device value is worth rewriting SK/config.txt.
+        before = app_settings.load()
         app_settings.save(merged)
         apply_runtime_settings(self.bridge, merged)
 
         card_config = None
-        if any(key in body for key in app_settings.CARD_KEYS):
+        if any(merged[key] != before[key] for key in app_settings.CARD_KEYS):
             card_config = write_card_config(merged)
-        self._send(200, {"ok": True, "settings": app_settings.load(),
-                         "card_config": card_config, "restart_needed": False})
+        response = {"ok": True, "settings": app_settings.load(),
+                    "restart_needed": False}
+        if card_config is not None:
+            response["card_config"] = card_config
+        self._send(200, response)
 
     def _post_restart(self):
         """Restart the bridge service: answer, then exit non-zero.

@@ -908,13 +908,19 @@
     settingsState.values = reply.settings || settingsState.values;
     cacheSettings(reply.settings);
     applySettings(reply.settings);
-    let msg = "settings saved \u2014 applied, no restart";
-    const card = reply.card_config;
-    if (card && card.error) msg += `\nconfig.txt: ${card.error}`;
-    else if (card && card.warning) msg += `\n${card.warning}`;
-    else if (card && card.written) msg += "\nconfig.txt written to the card";
-    setSMsg(msg, card && (card.error || card.warning) ? "warn" : "ok");
-    if (!ui.busy) setStatus("settings saved", "");
+    const card = reply.card_config || {};
+    let message = "settings saved";
+    let kind = "";
+    if (card.error || card.warning) {
+      message = card.error || card.warning;
+      kind = "warn";
+    } else if (card.written) {
+      message = "settings saved \u2014 config.txt written";
+    }
+    el.ssave.disabled = false;
+    el.scancel.disabled = false;
+    closeSettings();
+    if (!ui.busy) setStatus(message, kind);
   }
 
   // The stale-bridge escape hatch: the service exits non-zero and systemd's

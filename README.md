@@ -119,8 +119,9 @@ pipeline needs no change).
   disabled). It re-checks every 20 s.
 - **Gear button** opens the settings panel: every setting from
   `tools/settings.py` rendered from the schema the bridge serves (labels,
-  controls, ranges, hover help). Save validates, stores and applies without a
-  restart; **Settings** below writes the same list out in prose, with suggested
+  controls, ranges, hover help). Save validates, stores, applies without a
+  restart and closes the panel like Cancel; **Settings** below writes the same
+  list out in prose, with suggested
   uses. **Restart bridge service** at the bottom restarts the systemd unit
   so the bridge reloads the code on disk — use it after editing bridge or tool
   code, since a running service keeps the build it started with. The panel
@@ -154,8 +155,9 @@ Who reads a key, and when a change lands:
 - **widget** — the browser widget reads it for the next save, countdown tick or
   fresh page: placement, transport, speed limits and countdown timing change
   live.
-- **card** — written to `SK/config.txt` when you save with the SD card mounted;
-  the unit picks the values up at its next power-up with that card in.
+- **card** — written to `SK/config.txt` when a save changes a device value with
+  the SD card mounted; the unit picks the values up at its next power-up with
+  that card in.
 - **bridge** — read by the running bridge process and applied to the next job.
 
 Each key is listed with the value it ships, what it does, and when it is worth
@@ -435,10 +437,10 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 293 python tests
+    python3 -m unittest discover -s tests -t . -v       # 297 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 77 widget tests
+                tests/test_widget_wiring.mjs            # 78 widget tests
 
 `-t .` matters: without it the modules import top-level and `tests/__init__.py`
 never runs, so the suite reads your real settings file instead of the pinned
@@ -460,7 +462,7 @@ temp path. Test modules import as `tests.test_x` on purpose.
   file under `tools/rnnoise_models/`, the picker offers the empty default
   first and every voice after it, a blank value stays blank, and a value that
   is not a bundled name is passed through untouched rather than rewritten.
-- `tests/test_bridge.py` — 40 tests, real HTTP against `tests/stub_tool.py`, so
+- `tests/test_bridge.py` — 44 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
 - `tests/test_settings.py` — 46 tests: every schema field carries hover help
   and its constraints, a missing/corrupt/partial file degrades to defaults per
