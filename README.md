@@ -317,6 +317,11 @@ always made, apart from that edge taper.
 - `lowpass_hz` (`3000`) — where the low-pass starts cutting, in Hz. 3000 keeps
   speech and drops the hiss above it, and is ignored while the low-pass is off.
   Suggested: leave 3000 for voice, and raise it when speech sounds muffled.
+
+The **Isolate audio speech** tick in the panel is a shortcut, not a setting of
+its own and never saved as one: it sets the high-pass to 200 Hz and the low-pass
+to 3 kHz, the band a voice lives in.
+
 - `dc_shift` (`off`) — measures the cut's DC offset and shifts it out before
   the re-time. An offset eats headroom and shows up as a click at the
   cut edges; the measurement is one short `astats` probe. Suggested: on when a
@@ -433,7 +438,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
     python3 -m unittest discover -s tests -t . -v       # 293 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 76 widget tests
+                tests/test_widget_wiring.mjs            # 77 widget tests
 
 `-t .` matters: without it the modules import top-level and `tests/__init__.py`
 never runs, so the suite reads your real settings file instead of the pinned

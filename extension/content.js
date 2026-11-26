@@ -19,6 +19,13 @@
   const RATE_MS = 500;
   const COUNTDOWN_MS = 200;
 
+  // The band a voice lives in: 200 Hz to drop the rumble under it, 3 kHz to
+  // drop the hiss above it. A shortcut over four real settings, not a setting
+  // of its own, so nothing is posted for it and nothing is hidden when it is
+  // used: the four controls show exactly what Save will send.
+  const SPEECH_BAND = { highpass_hz: 200, lowpass_hz: 3000 };
+  const SPEECH_KEYS = ["highpass", "highpass_hz", "lowpass", "lowpass_hz"];
+
   const ui = { collapsed: false, left: null, top: null,
              busy: false, timer: null, online: null, ready: false, transport: null };
 
@@ -727,6 +734,7 @@
           settingsState.inputs.set(field.key, row.input);
           host.appendChild(row.node);
         });
+        if (section.key === "advanced") installSpeechPreset(host);
       });
       syncModelPicker();
     }
@@ -759,6 +767,59 @@
     const pick = () => { model.disabled = method.value !== "arnndn"; };
     method.addEventListener("change", pick);
     pick();
+  }
+
+  // The "Isolate audio speech" checkbox is a shortcut over the four band
+  // settings, not a setting of its own: it is never registered in
+  // settingsState.inputs, so collectValues() cannot post it and the bridge
+  // never sees an unknown key. It writes the four visible values only.
+  function matchesSpeechBand(input, want) {
+    return input.type === "checkbox" ? input.checked === want
+      : String(input.value).trim() === String(want);
+  }
+
+  function setSpeechBandControl(input, want) {
+    if (input.type === "checkbox") input.checked = want;
+    else input.value = String(want);
+  }
+
+  function installSpeechPreset(host) {
+    const boxes = {};
+    SPEECH_KEYS.forEach((key) => { boxes[key] = settingsState.inputs.get(key); });
+    // An older bridge without the low-pass sends no row for it: no shortcut.
+    if (SPEECH_KEYS.some((key) => !boxes[key])) return;
+    const row = document.createElement("div");
+    row.className = "srow";
+    const label = document.createElement("label");
+    label.textContent = "Isolate audio speech";
+    label.title = "Sets the high-pass to 200 Hz and the low-pass to 3 kHz: the "
+      + "band a voice lives in, with the rumble and the hiss outside it. "
+      + "Ticking it turns both filters on; unticking turns both off.";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.id = "spottytube-set-isolate_speech";
+    label.htmlFor = box.id;
+    const sync = () => {
+      box.checked = matchesSpeechBand(boxes.highpass, true)
+        && matchesSpeechBand(boxes.highpass_hz, SPEECH_BAND.highpass_hz)
+        && matchesSpeechBand(boxes.lowpass, true)
+        && matchesSpeechBand(boxes.lowpass_hz, SPEECH_BAND.lowpass_hz);
+    };
+    box.addEventListener("change", () => {
+      setSpeechBandControl(boxes.highpass, box.checked);
+      setSpeechBandControl(boxes.lowpass, box.checked);
+      if (box.checked) {
+        setSpeechBandControl(boxes.highpass_hz, SPEECH_BAND.highpass_hz);
+        setSpeechBandControl(boxes.lowpass_hz, SPEECH_BAND.lowpass_hz);
+      }
+      sync();
+    });
+    SPEECH_KEYS.forEach((key) => { boxes[key].addEventListener("change", sync); });
+    row.appendChild(label);
+    row.appendChild(box);
+    row.title = label.title;
+    host.appendChild(row);
+    sync();
   }
 
   function positionSettings() {

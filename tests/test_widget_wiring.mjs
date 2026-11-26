@@ -375,3 +375,12 @@ test("the voice picker is live only while arnndn is selected", () => {
   assert.match(src, /model\.disabled\s*=\s*method\.value\s*!==\s*"arnndn"/);
   assert.match(src, /pick\(\)/);
 });
+
+test("the speech shortcut sets the band, never posts itself", () => {
+  const src = extract("installSpeechPreset");
+  assert.match(src, /highpass_hz/);
+  assert.match(src, /lowpass_hz/);
+  assert.match(src, /Isolate audio speech/);
+  assert.doesNotMatch(src, /settingsState\.inputs\.set/);
+  assert.doesNotMatch(src, /collectValues/);
+});
