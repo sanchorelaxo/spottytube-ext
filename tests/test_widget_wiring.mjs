@@ -432,6 +432,11 @@ test("a successful save leaves the panel like cancelling does", () => {
   assert.ok(failEnd !== -1, "the failed-save branch must still return");
   assert.doesNotMatch(src.slice(failReturn, failEnd), /closeSettings\(\)/,
     "the failed-save branch must keep the panel open");
+  // ...and the close is not conditional on being idle. The guard below only
+  // silences the status line while a send is in flight; folding the close into
+  // it would leave the panel up on a successful save that happened mid-send.
+  assert.doesNotMatch(src, /if \(!ui\.busy\) \{[\s\S]{0,60}?closeSettings\(\)/,
+    "the panel must close on every successful save, not only when idle");
   // The card note no longer goes into the panel...
   assert.doesNotMatch(src, /setSMsg\(msg/);
   // ...it is the status line message, warn-styled when the card has a caveat.
