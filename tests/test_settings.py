@@ -385,6 +385,12 @@ class TestAdvancedSection(TempSettingsCase):
         self.assertEqual([choice["value"] for choice in field["choices"]],
                          [choice["value"] for choice in rnnoise_models.choices()])
 
+    def test_the_arnndn_choice_names_the_bundled_voice_not_a_missing_file(self):
+        labels = {choice["value"]: choice["label"]
+                  for choice in st.FIELDS["nr_method"]["choices"]}
+        self.assertNotIn("needs a model", labels["arnndn"])
+        self.assertIn("rnnoise", labels["arnndn"])
+
     def test_an_unbundled_voice_is_refused_by_name(self):
         merged, errors = st.validate({"nr_model": "nope"}, base=st.defaults())
         self.assertIsNone(merged)

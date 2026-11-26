@@ -427,7 +427,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 292 python tests
+    python3 -m unittest discover -s tests -t . -v       # 293 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
                 tests/test_widget_wiring.mjs            # 75 widget tests
@@ -455,7 +455,7 @@ temp path. Test modules import as `tests.test_x` on purpose.
   rewritten.
 - `tests/test_bridge.py` — 40 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
-- `tests/test_settings.py` — 45 tests: every schema field carries hover help
+- `tests/test_settings.py` — 46 tests: every schema field carries hover help
   and its constraints, a missing/corrupt/partial file degrades to defaults per
   key, validation enforces select choices, number ranges and cross-field rules
   (speed envelope, MIDI channels differ, `tool_path` ends in `.py`), saves are

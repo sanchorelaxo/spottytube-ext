@@ -470,7 +470,7 @@ SCHEMA = [
         "choices": [
             _choice("afftdn", "afftdn (spectral, no files)"),
             _choice("anlmdn", "anlmdn (non-local means, no files)"),
-            _choice("arnndn", "arnndn (rnnoise, needs a model)"),
+            _choice("arnndn", "arnndn (rnnoise, bundled voice)"),
         ],
         "default": "afftdn",
         "help": "Which denoiser to use. afftdn is ffmpeg's built-in spectral "
