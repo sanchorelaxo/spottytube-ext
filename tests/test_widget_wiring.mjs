@@ -372,4 +372,6 @@ test("the voice picker is live only while arnndn is selected", () => {
   assert.match(src, /"arnndn"/);
   assert.match(src, /addEventListener\("change"/);
   assert.match(extract("renderFields"), /syncModelPicker\(\)/);
+  assert.match(src, /model\.disabled\s*=\s*method\.value\s*!==\s*"arnndn"/);
+  assert.match(src, /pick\(\)/);
 });
