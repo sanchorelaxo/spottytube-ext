@@ -383,4 +383,23 @@ test("the speech shortcut sets the band, never posts itself", () => {
   assert.match(src, /Isolate audio speech/);
   assert.doesNotMatch(src, /settingsState\.inputs\.set/);
   assert.doesNotMatch(src, /collectValues/);
+  // The call site: without it the shortcut never appears in the panel.
+  assert.match(extract("renderFields"), /installSpeechPreset\(host\)/);
+  // The band's values, not merely that some value is written.
+  assert.match(content, /SPEECH_BAND = \{ highpass_hz: 200, lowpass_hz: 3000 \}/);
+  // Both filters on and both cutoffs at the band: an AND, not an OR.
+  assert.match(src, /matchesSpeechBand\(boxes\.highpass, true\)\s*&&/);
+  // Each cutoff gets its own frequency, and the two are never swapped.
+  assert.match(src, /setSpeechBandControl\(boxes\.highpass_hz, SPEECH_BAND\.highpass_hz\)/);
+  assert.match(src, /setSpeechBandControl\(boxes\.lowpass_hz, SPEECH_BAND\.lowpass_hz\)/);
+  // Ticking writes the cutoffs; unticking only clears the two boxes.
+  assert.match(src, /if \(box\.checked\) \{/);
+  // The shortcut's own listener. A bare /addEventListener\("change"/ would not
+  // do: the sibling loop at :817 also matches it, so this names the box.
+  assert.match(src, /box\.addEventListener\("change"/);
+  // The checkbox branch compares, it does not merely read.
+  assert.match(extract("matchesSpeechBand"), /input\.checked === want/);
+  // The early return: an older bridge without the low-pass sends no row, so
+  // the shortcut must bail rather than install a half-wired preset.
+  assert.match(src, /if \(SPEECH_KEYS\.some\(\(key\) => !boxes\[key\]\)\) return;/);
 });
