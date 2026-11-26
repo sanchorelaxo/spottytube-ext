@@ -728,6 +728,7 @@
           host.appendChild(row.node);
         });
       });
+      syncModelPicker();
     }
     clampIntoView(el.settings);   // content height changed: keep the footer reachable
   }
@@ -746,6 +747,18 @@
       } else out[key] = input.value;
     });
     return out;
+  }
+
+  // rnnoise needs a voice and the other two methods ignore one, so the row is
+  // live only while arnndn is selected. The value is left alone: a greyed row
+  // says why it does not matter right now without losing the choice.
+  function syncModelPicker() {
+    const method = settingsState.inputs.get("nr_method");
+    const model = settingsState.inputs.get("nr_model");
+    if (!method || !model) return;
+    const pick = () => { model.disabled = method.value !== "arnndn"; };
+    method.addEventListener("change", pick);
+    pick();
   }
 
   function positionSettings() {

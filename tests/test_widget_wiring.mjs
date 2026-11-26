@@ -359,3 +359,17 @@ test("opening settings clamps the tall panel back into the viewport", () => {
   assert.match(fn, /getBoundingClientRect/);
   assert.match(fn, /innerHeight/);
 });
+
+// rnnoise needs a voice and the other methods ignore one, so the voice row is
+// live only while arnndn is selected. This greps the shipped body (not a
+// re-implementation) and fails if it stops reading the method, stops touching
+// the picker, drops the listener, or is never wired into renderFields.
+test("the voice picker is live only while arnndn is selected", () => {
+  const src = extract("syncModelPicker");
+  assert.match(src, /nr_method/);
+  assert.match(src, /nr_model/);
+  assert.match(src, /\.disabled\s*=/);
+  assert.match(src, /"arnndn"/);
+  assert.match(src, /addEventListener\("change"/);
+  assert.match(extract("renderFields"), /syncModelPicker\(\)/);
+});

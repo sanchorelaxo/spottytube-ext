@@ -433,7 +433,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
     python3 -m unittest discover -s tests -t . -v       # 293 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 75 widget tests
+                tests/test_widget_wiring.mjs            # 76 widget tests
 
 `-t .` matters: without it the modules import top-level and `tests/__init__.py`
 never runs, so the suite reads your real settings file instead of the pinned
