@@ -1,0 +1,5 @@
+# The bundled rnnoise voices under tools/rnnoise_models/ are byte-exact
+# payloads: ffmpeg loads them by their pinned SHA-256, so any EOL conversion
+# on checkout (core.autocrlf=true, a global `* text=auto`) would corrupt them.
+# Mark them binary so git never treats them as text.
+*.rnnn binary
