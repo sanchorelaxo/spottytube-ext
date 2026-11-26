@@ -352,8 +352,11 @@ always made, apart from that edge taper.
 - `nr_model` (``) — which rnnoise voice `arnndn` runs. The picker offers the
   five voices bundled with the tool, and each choice's label says what that
   voice was trained on. `arnndn` runs the voice you pick; `afftdn` and
-  `anlmdn` ignore it. A value hand-edited to something that is not a bundled
-  name is refused when you save, and the field is named in the error.
+  `anlmdn` ignore it. A value posted from the panel that is not a bundled
+  name is refused when you save, and the field is named in the error; a value
+  hand-edited into the file that is not a bundled name never reaches the
+  panel, because the load falls back per key and drops it to the empty
+  default.
 
 **Match `loudnorm_tp` and `true_peak_dbtp`.** Loudnorm drives toward its own TP
 (default `-1.5`) and the limiter caps at `true_peak_dbtp` (default `-1.0`). Two
@@ -451,8 +454,7 @@ temp path. Test modules import as `tests.test_x` on purpose.
   (`tools/rnnoise_models.py`). Each voice name resolves to a shipped `.rnnn`
   file under `tools/rnnoise_models/`, the picker offers the empty default
   first and every voice after it, a blank value stays blank, and a value that
-  is not a bundled name is passed through, so a user's own model path is never
-  rewritten.
+  is not a bundled name is passed through untouched rather than rewritten.
 - `tests/test_bridge.py` — 40 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
 - `tests/test_settings.py` — 46 tests: every schema field carries hover help

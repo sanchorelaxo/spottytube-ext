@@ -5,8 +5,8 @@
 so the five voices ship inside the checkout next to the module that names them.
 This file pins what the picker offers and how a settings value becomes a path:
 the empty default first, every bundled name after it, a blank staying blank,
-and an unbundled value passed through untouched so a user's own model path is
-never rewritten. The chain builder that consumes the paths is pinned in
+and an unbundled value passed through untouched rather than rewritten. The
+chain builder that consumes the paths is pinned in
 ``tests/test_audio_chain.py``.
 
 Run: python3 -m unittest tests.test_rnnoise_models -v

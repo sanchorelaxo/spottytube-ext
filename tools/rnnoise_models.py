@@ -86,9 +86,11 @@ def model_path(value) -> str:
 
     A blank value (empty or whitespace-only) resolves to ``""``, which the
     chain builder reads as "no model chosen". A value that names a bundled
-    voice resolves to that file's absolute path under :data:`DIR`. Anything
-    else is returned unchanged, so a user's own downloaded model path is never
-    rewritten. The path is never opened or stat'ed here or by the builder.
+    voice resolves to that file's absolute path under :data:`DIR`. Any other
+    value is returned unchanged rather than rewritten, so the builder never
+    touches the filesystem; the settings layer rejects a non-bundled name
+    before it gets here. The path is never opened or stat'ed here or by the
+    builder.
     """
     text = (value or "").strip()
     if not text:
