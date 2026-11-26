@@ -19,6 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "tools"))
 
+import rnnoise_models  # noqa: E402
 import settings as st  # noqa: E402
 
 
@@ -374,17 +375,35 @@ class TestAdvancedSection(TempSettingsCase):
                 with self.subTest(key=key):
                     self.assertTrue(field.get("choices"))
 
+    def test_nr_method_offers_two_denoisers_and_one_model_method(self):
+        choices = [choice["value"] for choice in st.FIELDS["nr_method"]["choices"]]
+        self.assertEqual(choices, ["afftdn", "anlmdn", "arnndn"])
+
+    def test_nr_model_offers_the_bundled_voices(self):
+        field = st.FIELDS["nr_model"]
+        self.assertEqual(field["control"], "select")
+        self.assertEqual([choice["value"] for choice in field["choices"]],
+                         [choice["value"] for choice in rnnoise_models.choices()])
+
+    def test_an_unbundled_voice_is_refused_by_name(self):
+        merged, errors = st.validate({"nr_model": "nope"}, base=st.defaults())
+        self.assertIsNone(merged)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("nr_model must be one of", errors[0])
+        self.assertNotIn("one of ,", errors[0])
+        self.assertIn("mp", errors[0])
+
     def test_values_are_coerced_to_the_control(self):
         merged, errors = st.validate(
             {"edge_fade_ms": 5.4, "true_peak_dbtp": -0.5, "edge_fade": "loop",
-             "dc_shift": "true", "nr_model": "  /tmp/m.rnnn  "},
+             "dc_shift": "true", "nr_model": "lq"},
             base=st.defaults())
         self.assertEqual(errors, [])
         self.assertEqual(merged["edge_fade_ms"], 5)
         self.assertEqual(merged["true_peak_dbtp"], -0.5)
         self.assertEqual(merged["edge_fade"], "loop")
         self.assertIs(merged["dc_shift"], True)
-        self.assertEqual(merged["nr_model"], "/tmp/m.rnnn")
+        self.assertEqual(merged["nr_model"], "lq")
 
     def test_bad_values_name_the_field(self):
         _, errors = st.validate({"edge_fade": "declik", "loudnorm_lra": 99,

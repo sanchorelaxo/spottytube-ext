@@ -28,6 +28,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import rnnoise_models
+
 # Panel order in the GUI.
 SECTIONS = (
     ("audio", "Audio pipeline"),
@@ -467,21 +469,24 @@ SCHEMA = [
         "label": "Denoise method", "control": "select",
         "choices": [
             _choice("afftdn", "afftdn (spectral, no files)"),
+            _choice("anlmdn", "anlmdn (non-local means, no files)"),
             _choice("arnndn", "arnndn (rnnoise, needs a model)"),
         ],
         "default": "afftdn",
-        "help": "Which denoiser to use. afftdn is ffmpeg's spectral denoiser "
-                "and needs no external files; arnndn is rnnoise, better on "
-                "speech but it needs the model file below. Only used when "
-                "Noise reduction is on.",
+        "help": "Which denoiser to use. afftdn is ffmpeg's built-in spectral "
+                "denoiser and needs nothing; anlmdn is the non-local-means "
+                "denoiser, also self-contained; arnndn is rnnoise, better on "
+                "speech, and runs a bundled voice. Only used when Noise "
+                "reduction is on.",
     },
     {
         "key": "nr_model", "section": "advanced", "scope": "tool",
-        "label": "rnnoise model", "control": "text", "default": "",
-        "help": "Path to the rnnoise model (.rnnn) that arnndn loads. Left "
-                "empty, a build with arnndn selected stops with a clear "
-                "error rather than guessing at a model; afftdn needs no "
-                "file at all.",
+        "label": "Noise-reduction voice", "control": "select",
+        "choices": rnnoise_models.choices(),
+        "default": "",
+        "help": "Which rnnoise voice arnndn runs. The bundled voices differ in "
+                "what they were trained on; the picker labels each one. "
+                "Ignored by afftdn and anlmdn.",
     },
 ]
 
@@ -532,7 +537,8 @@ def _coerce(field, value):
         text = str(value)
         allowed = [choice["value"] for choice in field["choices"]]
         if text not in allowed:
-            return None, f"{key} must be one of {', '.join(allowed)}"
+            named = [choice for choice in allowed if choice]
+            return None, f"{key} must be one of {', '.join(named)}"
         return text, None
 
     if control == "checkbox":

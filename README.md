@@ -349,12 +349,11 @@ always made, apart from that edge taper.
   runs one of five voices bundled with the tool. Used when `noise_reduction`
   is on. Suggested: `afftdn` for hiss and hum, `anlmdn` for a steady hiss,
   `arnndn` for voice.
-- `nr_model` (`""`) — the `.rnnn` model that `arnndn` loads. Left blank, a
-  build with `arnndn` selected stops with a clear error rather than guessing at
-  a model; a path that does not load fails loudly inside ffmpeg instead of
-  passing the audio through untouched. The tool never downloads a model for
-  you. Suggested: leave it blank while `nr_method` is `afftdn`, which needs no
-  file at all.
+- `nr_model` (``) — which rnnoise voice `arnndn` runs. The picker offers the
+  five voices bundled with the tool, and each choice's label says what that
+  voice was trained on. `arnndn` runs the voice you pick; `afftdn` and
+  `anlmdn` ignore it. A value hand-edited to something that is not a bundled
+  name is refused when you save, and the field is named in the error.
 
 **Match `loudnorm_tp` and `true_peak_dbtp`.** Loudnorm drives toward its own TP
 (default `-1.5`) and the limiter caps at `true_peak_dbtp` (default `-1.0`). Two
@@ -428,7 +427,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 289 python tests
+    python3 -m unittest discover -s tests -t . -v       # 292 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
                 tests/test_widget_wiring.mjs            # 75 widget tests
@@ -456,7 +455,7 @@ temp path. Test modules import as `tests.test_x` on purpose.
   rewritten.
 - `tests/test_bridge.py` — 40 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
-- `tests/test_settings.py` — 42 tests: every schema field carries hover help
+- `tests/test_settings.py` — 45 tests: every schema field carries hover help
   and its constraints, a missing/corrupt/partial file degrades to defaults per
   key, validation enforces select choices, number ranges and cross-field rules
   (speed envelope, MIDI channels differ, `tool_path` ends in `.py`), saves are
