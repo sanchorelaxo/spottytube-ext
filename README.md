@@ -437,7 +437,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 297 python tests
+    python3 -m unittest discover -s tests -t . -v       # 298 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
                 tests/test_widget_wiring.mjs            # 78 widget tests
