@@ -227,9 +227,9 @@ means "use the built-in default".
 ### Device (config.txt)
 
 - `mid_ch_a` (`1`) — the MIDI channel deck A listens on, 1-16; it must differ
-  from deck B. Written to `SK/config.txt` when you save with the card mounted,
-  and the unit picks it up at its next power-up. Suggested: leave both channels
-  alone unless the unit shares a MIDI path with other gear.
+  from deck B. Written to `SK/config.txt` only when a save changes it and the
+  card is mounted; the unit picks it up at its next power-up. Suggested: leave
+  both channels alone unless the unit shares a MIDI path with other gear.
 - `mid_ch_b` (`2`) — the MIDI channel deck B listens on, 1-16; it must differ
   from deck A. Written the same way, picked up at the next power-up.
 - `mid_ps_a` (`off`) — lets MIDI Start/Stop messages control deck A playback.
@@ -462,7 +462,7 @@ temp path. Test modules import as `tests.test_x` on purpose.
   file under `tools/rnnoise_models/`, the picker offers the empty default
   first and every voice after it, a blank value stays blank, and a value that
   is not a bundled name is passed through untouched rather than rewritten.
-- `tests/test_bridge.py` — 44 tests, real HTTP against `tests/stub_tool.py`, so
+- `tests/test_bridge.py` — 45 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
 - `tests/test_settings.py` — 46 tests: every schema field carries hover help
   and its constraints, a missing/corrupt/partial file degrades to defaults per

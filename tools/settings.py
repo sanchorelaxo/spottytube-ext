@@ -152,18 +152,18 @@ SCHEMA = [
         "label": "Deck A MIDI channel", "control": "number",
         "min": 1, "max": 16, "step": 1, "default": 1,
         "help": "MIDI channel deck A listens on (config.txt mid_ch_a, 1-16). "
-                "Must differ from deck B. Written to SK/config.txt when you "
-                "save with the card mounted; the unit picks it up at the next "
-                "power-up.",
+                "Must differ from deck B. Written to SK/config.txt only when "
+                "a save changes it and the card is mounted; the unit picks it "
+                "up at the next power-up.",
     },
     {
         "key": "mid_ch_b", "section": "device", "scope": "card",
         "label": "Deck B MIDI channel", "control": "number",
         "min": 1, "max": 16, "step": 1, "default": 2,
         "help": "MIDI channel deck B listens on (config.txt mid_ch_b, 1-16). "
-                "Must differ from deck A. Written to SK/config.txt when you "
-                "save with the card mounted; the unit picks it up at the next "
-                "power-up.",
+                "Must differ from deck A. Written to SK/config.txt only when "
+                "a save changes it and the card is mounted; the unit picks it "
+                "up at the next power-up.",
     },
     {
         "key": "mid_ps_a", "section": "device", "scope": "card",
