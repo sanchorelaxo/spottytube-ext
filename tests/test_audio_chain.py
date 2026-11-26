@@ -408,6 +408,11 @@ class TestNoiseReduction(unittest.TestCase):
         out = ac.cut_filters(cfg(lowpass=False, lowpass_hz=3000), 5.0)
         self.assertNotIn("lowpass", out, msg=f"chain was {out!r}")
 
+    def test_lowpass_cutoff_of_zero_counts_as_off(self):
+        # A 0 Hz cutoff is the documented "off" spelling, same as the high-pass.
+        out = ac.cut_filters(cfg(lowpass=True, lowpass_hz=0), 5.0)
+        self.assertNotIn("lowpass", out, msg=f"chain was {out!r}")
+
     def test_an_inverted_band_is_not_second_guessed(self):
         # 4 kHz under a 5 kHz high-pass removes everything. The builder writes
         # what it was told, exactly as it does for a model path.
