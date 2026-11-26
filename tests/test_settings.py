@@ -402,7 +402,8 @@ class TestAdvancedSection(TempSettingsCase):
     def test_values_are_coerced_to_the_control(self):
         merged, errors = st.validate(
             {"edge_fade_ms": 5.4, "true_peak_dbtp": -0.5, "edge_fade": "loop",
-             "dc_shift": "true", "nr_model": "lq"},
+             "dc_shift": "true", "nr_model": "lq",
+             "cache_dir": "  /tmp/x  "},
             base=st.defaults())
         self.assertEqual(errors, [])
         self.assertEqual(merged["edge_fade_ms"], 5)
@@ -410,6 +411,7 @@ class TestAdvancedSection(TempSettingsCase):
         self.assertEqual(merged["edge_fade"], "loop")
         self.assertIs(merged["dc_shift"], True)
         self.assertEqual(merged["nr_model"], "lq")
+        self.assertEqual(merged["cache_dir"], "/tmp/x")
 
     def test_bad_values_name_the_field(self):
         _, errors = st.validate({"edge_fade": "declik", "loudnorm_lra": 99,
