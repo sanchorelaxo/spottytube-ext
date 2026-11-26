@@ -20,6 +20,7 @@ sys.path.insert(0, str(HERE.parent / "tools"))
 
 import settings as st  # noqa: E402
 import audio_chain as ac  # noqa: E402
+import rnnoise_models  # noqa: E402
 
 
 def cfg(**over):
@@ -326,7 +327,7 @@ class TestResampleAndDither(unittest.TestCase):
 
 
 class TestNoiseReduction(unittest.TestCase):
-    """The ``<NR>`` term: bare ``afftdn``, or ``arnndn`` with a model, or none.
+    """The ``<NR>`` term: bare ``afftdn`` or ``anlmdn``, or ``arnndn`` with a voice.
 
     ``cut_filters`` is a pure string builder -- it never stats the model -- so
     the refusal is decided on the two settings alone (addendum B8, D5).
@@ -420,6 +421,34 @@ class TestNoiseReduction(unittest.TestCase):
                                  lowpass=True, lowpass_hz=4000), 5.0)
         self.assertIn("highpass=f=5000", out, msg=f"chain was {out!r}")
         self.assertIn("lowpass=f=4000", out, msg=f"chain was {out!r}")
+
+    def test_anlmdn_is_available_as_a_second_method(self):
+        # anlmdn is a second denoiser: it ships bare and excludes the others.
+        out = ac.cut_filters(cfg(noise_reduction=True, nr_method="anlmdn"), 5.0)
+        self.assertIn("anlmdn", out, msg=f"chain was {out!r}")
+        self.assertNotIn("afftdn", out, msg=f"chain was {out!r}")
+        self.assertNotIn("arnndn", out, msg=f"chain was {out!r}")
+
+    def test_a_bundled_voice_becomes_its_shipped_path(self):
+        # A bundled name resolves to the file shipped with the tool.
+        out = ac.cut_filters(cfg(noise_reduction=True, nr_method="arnndn", nr_model="lq"), 5.0)
+        path = rnnoise_models.model_path("lq")
+        self.assertTrue(path.endswith(".rnnn"), msg=path)
+        self.assertIn(f"arnndn=model={path}", out, msg=f"chain was {out!r}")
+
+    def test_the_selected_method_wins_when_a_voice_is_also_set(self):
+        # A voice chosen while afftdn is the method is ignored, not emitted.
+        out = ac.cut_filters(cfg(noise_reduction=True, nr_method="afftdn", nr_model="lq"), 5.0)
+        self.assertNotIn("arnndn", out, msg=f"chain was {out!r}")
+        self.assertIn("afftdn", out, msg=f"chain was {out!r}")
+
+    def test_a_deleted_bundled_voice_is_still_emitted(self):
+        # The builder never stats the path: a bundled name's path is written
+        # whether or not the file is on disk, so a missing model fails in
+        # ffmpeg at run time, not here.
+        path = rnnoise_models.model_path("mp")
+        out = ac.cut_filters(cfg(noise_reduction=True, nr_method="arnndn", nr_model="mp"), 5.0)
+        self.assertIn(f"arnndn=model={path}", out, msg=f"chain was {out!r}")
 
 
 class TestFinalLimiter(unittest.TestCase):

@@ -23,8 +23,9 @@ The filter order is fixed and meaningful::
 * ``dcshift`` removes any constant offset that survived.
 * ``<NR>`` (noise reduction) is optional and sits right after the DC shift and
   before the silence trim, so the trim threshold sees a denoised signal. It is
-  off by default and adds no term; when on it is bare ``afftdn`` or
-  ``arnndn=model=<nr_model>`` (see :func:`_noise_reduction`).
+  off by default and adds no term; when on it is bare ``afftdn``, bare
+  ``anlmdn``, or ``arnndn=model=<nr_model>`` where a bundled voice name is
+  resolved to the file shipped with the tool (see :func:`_noise_reduction`).
 * ``silenceremove`` trims dead air at both ends; the tail is reached by
   reversing, trimming, and reversing back.
 * ``afade`` de-clicks the cut boundary last, so it always tapers real audio
@@ -82,6 +83,8 @@ stores at every speed — including 1x, where ``retime_segment`` only copies the
 cut and spawns no ffmpeg at all. Bolt it onto the re-time pass and it would
 silently do nothing in the common case.
 """
+
+import rnnoise_models
 
 
 class NoiseModelMissing(ValueError):
@@ -185,24 +188,32 @@ def _dc_shift(cfg, dc_offset):
 def _noise_reduction(cfg):
     """The ``<NR>`` term, or ``None`` when noise reduction is off.
 
-    ``afftdn`` is ffmpeg's own FFT denoiser and ships bare — the spec names it
-    with no parameters, and it is the default method. ``arnndn`` is the rnnoise
-    model path and needs a model file, so a blank ``nr_model`` is refused here.
+    Three methods share this one stage. ``afftdn`` is ffmpeg's own FFT
+    denoiser and ships bare -- the spec names it with no parameters, and it is
+    the default. ``anlmdn`` is the non-local-means denoiser and ships bare too.
+    ``arnndn`` is rnnoise: it needs a ``.rnnn`` model, so its value is resolved
+    through :func:`rnnoise_models.model_path` (a bundled name becomes the
+    file's shipped path, anything else is passed through) and a blank result
+    is refused here.
 
-    This is a pure string builder: the model path is emitted verbatim and never
-    stat'ed or opened, so a missing or unreadable file surfaces as an ffmpeg
-    error in the pass that runs it, not as a refusal to build the chain.
+    This is a pure string builder: the model path is never stat'ed or opened,
+    so a missing or unreadable file surfaces as an ffmpeg error in the pass
+    that runs it, not as a refusal to build the chain.
     """
     if not cfg["noise_reduction"]:
         return None
-    if str(cfg.get("nr_method", "afftdn")) == "arnndn":
-        model = str(cfg.get("nr_model", "") or "").strip()
+    method = str(cfg.get("nr_method", "afftdn"))
+    if method == "arnndn":
+        model = rnnoise_models.model_path(cfg.get("nr_model"))
         if not model:
             raise NoiseModelMissing(
                 "noise reduction is set to arnndn but no rnnoise model is "
-                "configured — set the rnnoise model path, or use afftdn"
+                "configured; pick a voice in the panel's noise-reduction "
+                "voice row, or use afftdn"
             )
         return f"arnndn=model={model}"
+    if method == "anlmdn":
+        return "anlmdn"
     return "afftdn"
 
 

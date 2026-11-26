@@ -344,9 +344,11 @@ always made, apart from that edge taper.
   dull bright material. Suggested: on for a noisy source you cannot re-record,
   and listen to one sample before taping a batch.
 - `nr_method` (`afftdn`) — which denoiser to use. `afftdn` is ffmpeg's spectral
-  denoiser and needs no external files; `arnndn` is rnnoise, better on speech
-  but it needs the model below. Used when `noise_reduction` is on. Suggested:
-  `afftdn` for hiss and hum, `arnndn` for voice with a model in place.
+  denoiser and needs no external files; `anlmdn` is the non-local-means
+  denoiser, also self-contained; `arnndn` is rnnoise, better on speech, and
+  runs one of five voices bundled with the tool. Used when `noise_reduction`
+  is on. Suggested: `afftdn` for hiss and hum, `anlmdn` for a steady hiss,
+  `arnndn` for voice.
 - `nr_model` (`""`) — the `.rnnn` model that `arnndn` loads. Left blank, a
   build with `arnndn` selected stops with a clear error rather than guessing at
   a model; a path that does not load fails loudly inside ffmpeg instead of
@@ -426,7 +428,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 281 python tests
+    python3 -m unittest discover -s tests -t . -v       # 289 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
                 tests/test_widget_wiring.mjs            # 75 widget tests
@@ -435,16 +437,23 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 never runs, so the suite reads your real settings file instead of the pinned
 temp path. Test modules import as `tests.test_x` on purpose.
 
-- `tests/test_audio_chain.py` — 57 tests: the pure `-af` filter builder
+- `tests/test_audio_chain.py` — 61 tests: the pure `-af` filter builder
   (`tools/audio_chain.py`) with no ffmpeg in sight, so a change to the chain
   order (highpass, lowpass, dc-shift, denoise, trim, fades, loudnorm,
   resample) or to a flag fails here instead of only showing up as a quietly
   different WAV.
-  Pins the neutral build reproducing the legacy hardcode, the arnndn model
-  refusal, the true-peak limiter staying out of the cut chain, and the
-  de-click anchors following the filter graph's clock origin (a taper left on
-  a 0-based clock under an accurate seek zeroes the whole cut). The
-  real-ffmpeg behaviour of these filters lives in `tests/test_sample_tool.py`.
+  Pins the neutral build reproducing the legacy hardcode, the `anlmdn`
+  method, the bundled-voice path resolution, the arnndn model refusal, the
+  true-peak limiter staying out of the cut chain, and the de-click anchors
+  following the filter graph's clock origin (a taper left on a 0-based clock
+  under an accurate seek zeroes the whole cut). The real-ffmpeg behaviour of
+  these filters lives in `tests/test_sample_tool.py`.
+- `tests/test_rnnoise_models.py` — 4 tests: the bundled rnnoise voices
+  (`tools/rnnoise_models.py`). Each voice name resolves to a shipped `.rnnn`
+  file under `tools/rnnoise_models/`, the picker offers the empty default
+  first and every voice after it, a blank value stays blank, and a value that
+  is not a bundled name is passed through, so a user's own model path is never
+  rewritten.
 - `tests/test_bridge.py` — 40 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
 - `tests/test_settings.py` — 42 tests: every schema field carries hover help

@@ -79,6 +79,17 @@ if [ ! -f "$ROOT/tools/sample_tool.py" ]; then
 fi
 echo "tool    $ROOT/tools/sample_tool.py"
 
+# The five rnnoise voices ship in the checkout so arnndn has a model to run
+# without the user fetching one; a partial checkout must fail here instead of
+# leaving arnndn pointing at a file that is not there.
+for model in mp lq cb bd sh; do
+    if [ ! -f "$ROOT/tools/rnnoise_models/$model.rnnn" ]; then
+        echo "error: rnnoise model missing at $ROOT/tools/rnnoise_models/$model.rnnn" >&2
+        exit 1
+    fi
+done
+echo "models  $ROOT/tools/rnnoise_models (mp lq cb bd sh)"
+
 # wav_builder.py is vendored in tools/, so there is nothing to fetch: the
 # checkout carries the one copy the tool and the bridge both import.
 if [ ! -f "$ROOT/tools/wav_builder.py" ]; then
