@@ -422,6 +422,16 @@ test("a successful save leaves the panel like cancelling does", () => {
   assert.ok(failReturn !== -1, "the failure branch must stay in saveSettings");
   assert.ok(src.indexOf("closeSettings()") > failReturn,
     "closeSettings() must sit after the failed-save return");
+  // ...but both of those pins survive moving closeSettings() one line down,
+  // INSIDE the failure branch: the count stays 1 and the index stays after the
+  // opener, while the panel would silently shut on a rejected save and the
+  // user would never read the error. So pin the branch itself -- the slice
+  // from its `if (!reply.ok) {` opener to its own `return;` must not close the
+  // panel.
+  const failEnd = src.indexOf("return;", failReturn);
+  assert.ok(failEnd !== -1, "the failed-save branch must still return");
+  assert.doesNotMatch(src.slice(failReturn, failEnd), /closeSettings\(\)/,
+    "the failed-save branch must keep the panel open");
   // The card note no longer goes into the panel...
   assert.doesNotMatch(src, /setSMsg\(msg/);
   // ...it is the status line message, warn-styled when the card has a caveat.

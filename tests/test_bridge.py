@@ -120,6 +120,53 @@ class TestSettingsPayload(ServerCase):
         _, second, _ = self.request("/settings", method="POST", body=values)
         self.assertNotIn("card_config", second)
 
+    def _a_different_value(self, key, settings):
+        """A value for one device key that differs from the stored value.
+
+        The pinned settings file is shared for the whole run, so read the
+        stored value and move away from it: the test must not depend on what an
+        earlier test left behind. A MIDI channel also stays clear of the other
+        deck's stored channel, since _cross_check rejects the pair being equal;
+        a checkbox simply flips.
+        """
+        field = bridge.app_settings.FIELDS[key]
+        current = settings[key]
+        if field["control"] == "checkbox":
+            return not bool(current)
+        other = settings["mid_ch_b" if key == "mid_ch_a" else "mid_ch_a"]
+        taken = {int(current), int(other)}
+        free = [n for n in range(field["min"], field["max"] + 1) if n not in taken]
+        self.assertTrue(free, msg=f"no unused channel left for {key}")
+        return free[0]
+
+    def test_every_device_key_is_covered(self):
+        """Every CARD_KEYS entry must raise the card note on its own.
+
+        The guard reads the whole CARD_KEYS tuple, so narrowing the key set (to
+        its first few, say) would leave the later device keys unable to rewrite
+        SK/config.txt at all while these tests stayed green. Move exactly one
+        device key per iteration and require the note, then re-post the
+        identical payload and require silence. The file is read fresh each pass
+        and restored afterwards, so the test neither depends on nor disturbs
+        the order it runs in.
+        """
+        original = bridge.app_settings.load()
+        try:
+            for key in bridge.app_settings.CARD_KEYS:
+                with self.subTest(device_key=key):
+                    _, body, _ = self.request("/settings")
+                    values = dict(body["settings"])
+                    values[key] = self._a_different_value(key, body["settings"])
+                    _, first, _ = self.request("/settings", method="POST", body=values)
+                    self.assertIn("card_config", first,
+                                  msg=f"{key}: a changed value raised no note; {first}")
+                    self.assertIn("no card", first["card_config"]["warning"])
+                    _, second, _ = self.request("/settings", method="POST", body=values)
+                    self.assertNotIn("card_config", second,
+                                     msg=f"{key}: re-posting the same value was not quiet; {second}")
+        finally:
+            bridge.app_settings.save(original)
+
     def test_an_unchanged_save_leaves_the_card_file_alone(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
