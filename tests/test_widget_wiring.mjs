@@ -402,4 +402,7 @@ test("the speech shortcut sets the band, never posts itself", () => {
   // The early return: an older bridge without the low-pass sends no row, so
   // the shortcut must bail rather than install a half-wired preset.
   assert.match(src, /if \(SPEECH_KEYS\.some\(\(key\) => !boxes\[key\]\)\) return;/);
+  // The four fields re-derive the tick when one of them is edited by hand:
+  // without this loop the box goes stale and claims a band that is not set.
+  assert.match(src, /boxes\[key\]\.addEventListener\("change", sync\)/);
 });
