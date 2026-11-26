@@ -426,7 +426,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 277 python tests
+    python3 -m unittest discover -s tests -t . -v       # 281 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
                 tests/test_widget_wiring.mjs            # 75 widget tests
@@ -435,10 +435,11 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 never runs, so the suite reads your real settings file instead of the pinned
 temp path. Test modules import as `tests.test_x` on purpose.
 
-- `tests/test_audio_chain.py` — 53 tests: the pure `-af` filter builder
+- `tests/test_audio_chain.py` — 57 tests: the pure `-af` filter builder
   (`tools/audio_chain.py`) with no ffmpeg in sight, so a change to the chain
-  order (highpass, dc-shift, denoise, trim, fades, loudnorm, resample) or to
-  a flag fails here instead of only showing up as a quietly different WAV.
+  order (highpass, lowpass, dc-shift, denoise, trim, fades, loudnorm,
+  resample) or to a flag fails here instead of only showing up as a quietly
+  different WAV.
   Pins the neutral build reproducing the legacy hardcode, the arnndn model
   refusal, the true-peak limiter staying out of the cut chain, and the
   de-click anchors following the filter graph's clock origin (a taper left on
