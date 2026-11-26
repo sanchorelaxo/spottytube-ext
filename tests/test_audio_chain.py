@@ -442,7 +442,7 @@ class TestNoiseReduction(unittest.TestCase):
         self.assertNotIn("arnndn", out, msg=f"chain was {out!r}")
         self.assertIn("afftdn", out, msg=f"chain was {out!r}")
 
-    def test_a_deleted_bundled_voice_is_still_emitted(self):
+    def test_a_bundled_voice_path_is_emitted_without_a_stat(self):
         # The builder never stats the path: a bundled name's path is written
         # whether or not the file is on disk, so a missing model fails in
         # ffmpeg at run time, not here.
