@@ -1756,6 +1756,82 @@ class TestFinalLimiterReal(unittest.TestCase):
             msg=f"no alimiter may run at the defaults: {seen!r}")
 
 
+class TestBeatSliceOrchestration(CardFixture):
+    """Beat slicing inside build_sample: warn, skip, block, and the real cut.
+
+    Detection is faked by putting a script named ``aubio`` first on PATH, so
+    the real subprocess path in beat_slice runs; only its output is scripted.
+    ``build_sample`` reaches the tape through a real card fixture, so a warn
+    that "still installs" is proven on the delivered sample, not asserted.
+    """
+
+    def settings(self, **values):
+        path = self.root / "settings.json"
+        path.write_text(json.dumps(values))
+        return mock.patch.dict(os.environ, {"SPOTTYTUBE_SETTINGS": str(path)})
+
+    @contextlib.contextmanager
+    def fake_aubio(self, stdout):
+        bindir = self.root / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        script = bindir / "aubio"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.stdout.write(" + repr(stdout) + ")\n")
+        script.chmod(0o755)
+        path = bindir.as_posix() + os.pathsep + os.environ["PATH"]
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            yield
+
+    def build(self, source, **settings):
+        with self.settings(**settings):
+            return sample_tool.build_sample(
+                str(source), "0:00", "0:01", card=self.root,
+                cache_dir=str(self.root / "cache"), install=True,
+                transport="card")
+
+    def test_beat_slice_warn_when_no_beats_sets_warning_and_still_installs(self):
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=1))
+        with self.fake_aubio(""):
+            result = self.build(source, slice_to_beat=True, slice_no_bpm="warn")
+        self.assertTrue(result.installed)
+        self.assertEqual(result.as_dict()["warning"], "No BPM found, cannot reslice")
+
+    def test_beat_slice_block_refuses_the_send_when_no_beats_are_found(self):
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=1))
+        with self.fake_aubio(""):
+            with self.assertRaises(RuntimeError) as caught:
+                self.build(source, slice_to_beat=True, slice_no_bpm="block")
+        self.assertEqual(str(caught.exception), "No BPM found, cannot reslice")
+
+    def test_beat_slice_skip_leaves_the_sample_alone_and_says_nothing(self):
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=1))
+        with self.fake_aubio(""):
+            result = self.build(source, slice_to_beat=True, slice_no_bpm="skip")
+        self.assertTrue(result.installed)
+        self.assertIsNone(result.as_dict()["warning"])
+        self.assertAlmostEqual(sample_tool.wav_seconds(result.segment_path), 1.0,
+                               delta=0.02, msg="skip must send the uncut sample")
+
+    def test_beats_hard_cut_the_delivered_sample_between_first_and_last(self):
+        # Four beats inside the one-second slice: the hard cut keeps
+        # [first, last], so the delivered sample is 0.75 s, not the 1 s input.
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=1))
+        with self.fake_aubio("0.1\n0.35\n0.6\n0.85\n"):
+            result = self.build(source, slice_to_beat=True, slice_no_bpm="warn",
+                                slice_boundary="hard")
+        self.assertTrue(result.installed)
+        self.assertIsNone(result.as_dict()["warning"])
+        self.assertAlmostEqual(sample_tool.wav_seconds(result.segment_path), 0.75,
+                               delta=0.02,
+                               msg="hard cut must run first beat to last beat")
+
+
 class TestNoiseReductionReal(unittest.TestCase):
     """Noise reduction end to end: bare ``afftdn`` drops the -50 dBFS floor.
 

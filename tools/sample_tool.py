@@ -67,6 +67,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import audio_chain as ac  # noqa: E402
+import beat_slice as bs  # noqa: E402
 import sk_install  # noqa: E402
 import settings as st_settings  # noqa: E402
 import wav_builder as wb  # noqa: E402
@@ -171,6 +172,7 @@ class SampleResult:
     card_path: Path | None = None
     speed: float = 1.0
     mode: str = "append"
+    warning: str | None = None
 
     def as_dict(self):
         return {
@@ -188,6 +190,7 @@ class SampleResult:
             "card_path": str(self.card_path) if self.card_path else None,
             "speed": self.speed,
             "mode": self.mode,
+            "warning": self.warning,
         }
 
 
@@ -1103,6 +1106,40 @@ def deliver(transport, card_root, tape, data, archive_dir, mode="bump", attempts
     raise last
 
 
+def _apply_beat_slice(segment, cfg):
+    """Trim a finished segment to its own beats, when the operator asked.
+
+    Reads the four slice settings. Runs after the re-time and the final
+    filters so a speed change cannot move the beats out from under the cut.
+    Returns the operator-facing warning when no usable BPM was found and the
+    policy is ``warn``; ``None`` when the sample is re-cut or deliberately
+    left alone. Raises ``RuntimeError`` under the ``block`` policy, and
+    ``detect_beats`` raises when aubio is missing. The cut replaces
+    ``segment`` in place so delivery sees the same path it always did.
+    """
+    if not cfg.get("slice_to_beat"):
+        return None
+    beats = bs.detect_beats(segment)
+    bounds = bs.choose_bounds(beats, cfg.get("slice_boundary"),
+                              cfg.get("slice_pad_ms", 0),
+                              wav_seconds(segment))
+    if bounds is None:
+        policy = cfg.get("slice_no_bpm")
+        if policy == "skip":
+            return None
+        if policy == "block":
+            raise RuntimeError(bs.NO_BPM_MESSAGE)
+        return bs.NO_BPM_MESSAGE
+    start_s, end_s = bounds
+    tmp = segment.with_name(segment.stem + ".beat.WAV")
+    try:
+        bs.reslice(segment, tmp, start_s, end_s)
+        os.replace(tmp, segment)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return None
+
+
 def build_sample(url, start, end, card=None, cache_dir=None,
                  search_roots=None, install=True, source=None, transport=None,
                  tape=None, archive_dir=None, speed=1.0, mode=None,
@@ -1202,10 +1239,16 @@ def build_sample(url, start, end, card=None, cache_dir=None,
     finally:
         cut.unlink(missing_ok=True)
 
+    # Last, so a retime or a filter change cannot move the beats: the cut is
+    # taken from the very bytes that ship. A block policy raises here, before
+    # anything is placed on the tape.
+    warning = _apply_beat_slice(segment, cfg)
+
     result = SampleResult(
         source=str(url), source_id=sid, start=start_s, end=end_s,
         tape=target_tape, slot=1,
         segment_path=segment, installed=False, speed=speed, mode=mode,
+        warning=warning,
     )
     if not install:
         return result
