@@ -316,7 +316,7 @@ class TestAdvancedSection(TempSettingsCase):
     """The collapsed "Advanced" group: schema, defaults, and payload hints.
 
     The group is the one place where schema drives a new UI mechanism, so it
-    is pinned here: the 18 keys, the section they belong to, the defaults
+    is pinned here: the 22 keys, the section they belong to, the defaults
     (only the de-click fade is on), and the collapse hints the panel reads.
     """
 
@@ -329,6 +329,7 @@ class TestAdvancedSection(TempSettingsCase):
         "resampler", "dither",
         "trim_silence", "trim_threshold_db",
         "noise_reduction", "nr_method", "nr_model",
+        "slice_to_beat", "slice_no_bpm", "slice_boundary", "slice_pad_ms",
     )
 
     EXPECTED_DEFAULTS = {
@@ -341,6 +342,8 @@ class TestAdvancedSection(TempSettingsCase):
         "resampler": "swr", "dither": "none",
         "trim_silence": False, "trim_threshold_db": -50,
         "noise_reduction": False, "nr_method": "afftdn", "nr_model": "",
+        "slice_to_beat": False, "slice_no_bpm": "warn",
+        "slice_boundary": "hard", "slice_pad_ms": 5,
     }
 
     def test_advanced_sits_right_after_audio(self):
@@ -439,6 +442,39 @@ class TestAdvancedSection(TempSettingsCase):
         for entry in st.sections_json():
             self.assertEqual(set(entry),
                              {"key", "label", "collapsible", "collapsed"})
+
+
+class TestBeatSliceSchema(TempSettingsCase):
+    """The four beat-slice fields the sample tool reads back from settings."""
+
+    KEYS = ("slice_to_beat", "slice_no_bpm", "slice_boundary", "slice_pad_ms")
+
+    def test_slice_fields_have_defaults_choices_and_tool_scope(self):
+        self.assertEqual(st.FIELDS["slice_to_beat"]["default"], False)
+        self.assertEqual(st.FIELDS["slice_no_bpm"]["default"], "warn")
+        self.assertEqual(st.FIELDS["slice_boundary"]["default"], "hard")
+        self.assertEqual(st.FIELDS["slice_pad_ms"]["default"], 5)
+        for key in self.KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(st.FIELDS[key]["scope"], "tool")
+                self.assertEqual(st.FIELDS[key]["section"], "advanced")
+        self.assertEqual(
+            {c["value"] for c in st.FIELDS["slice_no_bpm"]["choices"]},
+            {"skip", "warn", "block"})
+        self.assertEqual(
+            {c["value"] for c in st.FIELDS["slice_boundary"]["choices"]},
+            {"hard", "padded"})
+
+    def test_shipped_defaults_coerce_and_a_bad_policy_is_refused_by_name(self):
+        merged, errors = st.validate({"slice_no_bpm": "nope"}, base=st.defaults())
+        self.assertIsNone(merged)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("slice_no_bpm must be one of", errors[0])
+        merged, errors = st.validate(st.defaults(), base=st.defaults())
+        self.assertEqual(errors, [])
+        for key in self.KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(merged[key], st.defaults()[key])
 
 
 class TestReadmeSettingsSection(unittest.TestCase):

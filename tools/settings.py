@@ -488,6 +488,56 @@ SCHEMA = [
                 "what they were trained on; the picker labels each one. "
                 "Ignored by afftdn and anlmdn.",
     },
+    {
+        "key": "slice_to_beat", "section": "advanced", "scope": "tool",
+        "label": "Slice to auto-detected BPM (if any)", "control": "checkbox",
+        "default": False,
+        "help": "Trim the finished sample to its first and last detected beat so "
+                "a loop lands on the grid. The tool runs aubio's beat tracker "
+                "over the cut last, after the re-time and the final filters, so "
+                "a speed change cannot move the beats. Off by default: it costs "
+                "one extra aubio pass.",
+    },
+    {
+        "key": "slice_no_bpm", "section": "advanced", "scope": "tool",
+        "label": "When no BPM is found", "control": "select",
+        "choices": [
+            _choice("skip", "Skip silently (sample passes through uncut, no messages)"),
+            _choice("warn", "warn user but still send ('No BPM found, cannot reslice')"),
+            _choice("block", "Do not send if no BPM found"),
+        ],
+        "default": "warn",
+        "help": "What happens when the beat tracker finds no usable BPM: fewer "
+                "than four beats, or a first-to-last beat span under half a "
+                "second. skip sends the sample uncut with no message; warn "
+                "sends it uncut and shows 'No BPM found, cannot reslice'; "
+                "block refuses to send it. Used when Slice to auto-detected "
+                "BPM is on.",
+    },
+    {
+        "key": "slice_boundary", "section": "advanced", "scope": "tool",
+        "label": "Beat cut boundary", "control": "select",
+        "choices": [
+            _choice("hard", "Hard cut"),
+            _choice("padded", "Padded cut"),
+        ],
+        "default": "hard",
+        "help": "How the beat-derived cut meets the sample's own edges. hard "
+                "starts on the first beat and ends on the last; padded keeps "
+                "the lead-in and tail set below so the loop breathes. Used when "
+                "Slice to auto-detected BPM is on.",
+    },
+    {
+        "key": "slice_pad_ms", "section": "advanced", "scope": "tool",
+        "label": "Beat pad (ms)", "control": "number",
+        "min": 1, "max": 200, "step": 1,
+        "default": 5,
+        "help": "Milliseconds of lead-in and matching tail kept beyond the "
+                "first and last beat for a padded cut, clamped to the file. "
+                "Raise it for a looser loop, lower it for a tighter one. Only "
+                "used when Slice to auto-detected BPM is on and the boundary "
+                "is padded.",
+    },
 ]
 
 KEYS = tuple(field["key"] for field in SCHEMA)

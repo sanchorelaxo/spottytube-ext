@@ -364,6 +364,24 @@ to 3 kHz, the band a voice lives in.
   hand-edited into the file that is not a bundled name never reaches the
   panel, because the load falls back per key and drops it to the empty
   default.
+- `slice_to_beat` (`off`) — trim the finished sample to its first and last
+  detected beat so a loop lands on the grid. The tool runs aubio's beat
+  tracker over the cut last, after the re-time and the final filters, so a
+  speed change cannot move the beats. Off by default: it costs one extra
+  aubio pass.
+- `slice_no_bpm` (`warn`) — what happens when the beat tracker finds no
+  usable BPM: fewer than four beats, or a first-to-last beat span under half
+  a second. `skip` sends the sample uncut with no message; `warn` sends it
+  uncut and shows "No BPM found, cannot reslice"; `block` refuses to send it.
+  Used when `slice_to_beat` is on.
+- `slice_boundary` (`hard`) — how the beat-derived cut meets the sample's own
+  edges. `hard` starts on the first beat and ends on the last; `padded` keeps
+  the lead-in and tail set below so the loop breathes. Used when
+  `slice_to_beat` is on.
+- `slice_pad_ms` (`5`) — milliseconds of lead-in and matching tail kept beyond
+  the first and last beat for a `padded` cut, clamped to the file. Raise it
+  for a looser loop, lower it for a tighter one. Used when `slice_to_beat` is
+  on and `slice_boundary` is `padded`.
 
 **Match `loudnorm_tp` and `true_peak_dbtp`.** Loudnorm drives toward its own TP
 (default `-1.5`) and the limiter caps at `true_peak_dbtp` (default `-1.0`). Two
