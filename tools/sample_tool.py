@@ -1106,30 +1106,46 @@ def deliver(transport, card_root, tape, data, archive_dir, mode="bump", attempts
     raise last
 
 
+def _slice_policy_outcome(cfg, message):
+    """What the ``slice_no_bpm`` policy says about ``message``, or ``None``.
+
+    One rule for both ways a cut can fail to happen -- no usable BPM in the
+    sample, or no aubio to find one -- so the policy reads the same either way.
+    """
+    policy = cfg.get("slice_no_bpm")
+    if policy == "skip":
+        return None
+    if policy == "block":
+        raise RuntimeError(message)
+    return message
+
+
 def _apply_beat_slice(segment, cfg):
     """Trim a finished segment to its own beats, when the operator asked.
 
     Reads the four slice settings. Runs after the re-time and the final
     filters so a speed change cannot move the beats out from under the cut.
-    Returns the operator-facing warning when no usable BPM was found and the
+    Returns the operator-facing warning when nothing could be cut and the
     policy is ``warn``; ``None`` when the sample is re-cut or deliberately
-    left alone. Raises ``RuntimeError`` under the ``block`` policy, and
-    ``detect_beats`` raises when aubio is missing. The cut replaces
-    ``segment`` in place so delivery sees the same path it always did.
+    left alone. Raises ``RuntimeError`` under the ``block`` policy.
+
+    A missing aubio is one of the ways nothing can be cut. The box ships on, so
+    an optional tool that is not installed must not fail every build: it takes
+    the same route as an unpulsed sample, with a message that names the package
+    to install. The cut replaces ``segment`` in place so delivery sees the same
+    path it always did.
     """
     if not cfg.get("slice_to_beat"):
         return None
-    beats = bs.detect_beats(segment)
+    try:
+        beats = bs.detect_beats(segment)
+    except bs.AubioMissing:
+        return _slice_policy_outcome(cfg, bs.AUBIO_MISSING_MESSAGE)
     bounds = bs.choose_bounds(beats, cfg.get("slice_boundary"),
                               cfg.get("slice_pad_ms", 0),
                               wav_seconds(segment))
     if bounds is None:
-        policy = cfg.get("slice_no_bpm")
-        if policy == "skip":
-            return None
-        if policy == "block":
-            raise RuntimeError(bs.NO_BPM_MESSAGE)
-        return bs.NO_BPM_MESSAGE
+        return _slice_policy_outcome(cfg, bs.NO_BPM_MESSAGE)
     start_s, end_s = bounds
     tmp = segment.with_name(segment.stem + ".beat.WAV")
     try:

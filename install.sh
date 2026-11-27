@@ -98,6 +98,17 @@ if [ ! -f "$ROOT/tools/wav_builder.py" ]; then
 fi
 echo "dep     $ROOT/tools/wav_builder.py"
 
+# aubio is what measures a sample's beats. Beat slicing ships on, and the tool
+# treats a missing aubio as "no BPM found": the sample is delivered uncut with a
+# warning rather than failing the build. Name the case this machine is in now,
+# so the first build does not have to.
+if command -v aubio >/dev/null 2>&1; then
+    echo "tool    aubio ($(command -v aubio))"
+else
+    echo "warning: aubio not found; beat slicing will send samples through uncut" >&2
+    echo "         install it with: sudo apt install aubio-tools" >&2
+fi
+
 if [ ! -f "$ROOT/bridge/spottytube_bridge.py" ]; then
     echo "error: bridge script missing under $ROOT/bridge" >&2
     exit 1

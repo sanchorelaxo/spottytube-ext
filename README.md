@@ -35,6 +35,14 @@ That links `~/.local/bin/spottytube-bridge`, writes
 `/health`. Re-running is safe, and nothing is downloaded: the checkout is
 complete as cloned.
 
+Two external commands do the audio work and neither ships with the project.
+`ffmpeg` is required for every build. `aubio` (`sudo apt install aubio-tools`)
+is required for beat slicing: it measures a sample's beats. Beat slicing ships
+on, and a machine without `aubio` still works, sending each sample through
+uncut with a warning that names the package, so beat slicing is worth
+installing for rather than a wall. The installer prints which of the two it
+found on this machine.
+
 `tools/wav_builder.py` is vendored. It is maintained in the Spotykach skill
 repo, and the copy here is the one the tool and the bridge both import, so
 there is exactly one file to keep correct and nothing to fetch at install
@@ -369,11 +377,15 @@ to 3 kHz, the band a voice lives in.
   tracker over the cut last, after the re-time and the final filters, so a
   speed change cannot move the beats. On by default: it costs one extra
   aubio pass per sample, and a sample with no clear pulse is sent uncut (see
-  `slice_no_bpm`).
+  `slice_no_bpm`). Needs the `aubio` CLI on PATH (`sudo apt install
+  aubio-tools`); without it nothing can be measured, which counts as no BPM
+  and goes to `slice_no_bpm` like any other sample.
 - `slice_no_bpm` (`warn`) — what happens when the beat tracker finds no
   usable BPM: fewer than four beats, or a first-to-last beat span under half
   a second. `skip` sends the sample uncut with no message; `warn` sends it
   uncut and shows "No BPM found, cannot reslice"; `block` refuses to send it.
+  A machine with no `aubio` at all is the same case: nothing can be measured,
+  so this policy decides and the message names the package instead.
   Used when `slice_to_beat` is on, and its row is greyed out until then.
 - `slice_boundary` (`hard`) — how the beat-derived cut meets the sample's own
   edges. `hard` starts on the first beat and ends on the last; `padded` keeps
@@ -457,7 +469,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 317 python tests
+    python3 -m unittest discover -s tests -t . -v       # 323 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
                 tests/test_widget_wiring.mjs            # 82 widget tests
@@ -487,7 +499,9 @@ temp path. Test modules import as `tests.test_x` on purpose.
   asserting the plain float32 header and frame count, and a seek bound just
   above zero (where `str()` would emit scientific notation ffmpeg rejects).
   A third pins that a failed cut raises `RuntimeError`, not
-  `CalledProcessError`, so the CLI shows one clean line. `tools/` stays
+  `CalledProcessError`, so the CLI shows one clean line, and that a missing
+  aubio raises its own `AubioMissing` while a failing aubio does not, which is
+  what lets the tool degrade one and report the other. `tools/` stays
   stdlib-only: aubio is shelled out, never imported.
 - `tests/test_rnnoise_models.py` — 4 tests: the bundled rnnoise voices
   (`tools/rnnoise_models.py`). Each voice name resolves to a shipped `.rnnn`
@@ -510,7 +524,7 @@ temp path. Test modules import as `tests.test_x` on purpose.
   scan that walked nothing fails instead of passing forever, plus a tree
   walk that fails on `package.json`, `node_modules/` or a `jsdom` reference
   so the node harness stays plain `node --test`.
-- `tests/test_sample_tool.py` — 118 tests: time parsing, generic source ids,
+- `tests/test_sample_tool.py` — 121 tests: time parsing, generic source ids,
   transport choice, and placement on the tape chain against a real directory
   tree (bump cascades across tapes, append finds the first free slot, only a
   full Y/6 archives to the card root, read-back check, partial tapes), plus
@@ -518,12 +532,22 @@ temp path. Test modules import as `tests.test_x` on purpose.
   cut pass is decoded and measured too: the de-click taper landing on the
   first and last samples, the default chain matching the legacy cut byte for
   byte, and an accurate seek over a real opus/webm source keeping its audio
-  instead of producing digital silence (which the guard refuses).
+  instead of producing digital silence (which the guard refuses). The
+  beat-slice orchestration rides on the same card fixture: warn, skip and block
+  for a sample with no pulse, one case per policy for a machine with no aubio
+  at all, and a real hard cut that leaves the delivered sample 0.75 s of a 1 s
+  input.
 - `tests/test_install_browsers.py` — 20 tests: browser detection and filtering
   run under a throwaway PATH of stub executables, so no browser on the machine
   leaks into a result and no root is needed. Covers native, snap and Flatpak
   Chrome/Brave/Chromium, the `--browser` contract, and the exit code for a name
   that does not exist.
+- `tests/test_install_deps.py` — 3 tests: what `install.sh` says about aubio.
+  The installer runs for real under a throwaway PATH holding the host's tools
+  and no aubio, and under a temporary HOME, so a present aubio is reported with
+  its path and a missing one warns with the apt line instead of leaving the
+  first build to explain an uncut sample. A third reads the README and INSTALL
+  and fails if either stops naming the package and its apt line.
 - `tests/test_wav_builder.py` — 6 tests: the vendored module still has the API
   this project calls, its tape set and sample format agree with the rest of the
   pipeline, exactly one copy exists in the repo, and a real ffmpeg cut converts

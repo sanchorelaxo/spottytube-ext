@@ -27,13 +27,30 @@ MIN_SPAN_SECONDS = 0.5
 # The exact string the warn path surfaces (spec "Delivery", global constraint).
 NO_BPM_MESSAGE = "No BPM found, cannot reslice"
 
+# The message for a missing aubio. It names the package, because the fix is an
+# install, not a setting.
+AUBIO_MISSING_MESSAGE = (
+    "aubio is not installed; install aubio-tools "
+    "(sudo apt install aubio-tools) to slice to the beat")
+
+
+class AubioMissing(RuntimeError):
+    """aubio is not on PATH, so no beat can be measured here.
+
+    Its own type so a caller can degrade: the slice box ships on, and a machine
+    without the optional aubio would otherwise fail every single build. aubio
+    that ran and failed stays a plain ``RuntimeError``. Both are
+    ``RuntimeError``, which is the type the CLI and the bridge turn into one
+    clean line on stderr.
+    """
+
 
 def aubio_binary():
     """The ``aubio`` CLI on PATH, or ``None`` when it is absent.
 
     No bare-name fallback: callers ask this to tell "aubio is missing" (a
-    distinct, loud failure) apart from "aubio found no beats" (a no-BPM
-    outcome).
+    distinct failure the caller may degrade on) apart from "aubio found no
+    beats" (a no-BPM outcome).
     """
     return shutil.which("aubio")
 
@@ -63,14 +80,13 @@ def parse_beats(stdout):
 def detect_beats(path, binary=None):
     """Run aubio's beat tracker over ``path``; return beat times in seconds.
 
-    Raises ``RuntimeError`` when aubio is missing -- a distinct, loud failure,
-    never a "no beats" signal -- or when aubio exits nonzero.
+    Raises :class:`AubioMissing` (a ``RuntimeError``) when aubio is not
+    installed, so a caller can degrade instead of failing the build, or
+    ``RuntimeError`` when aubio is there but exits nonzero.
     """
     binary = binary or aubio_binary()
     if binary is None:
-        raise RuntimeError(
-            "aubio is not installed; install aubio-tools "
-            "(sudo apt install aubio-tools) to slice to the beat")
+        raise AubioMissing(AUBIO_MISSING_MESSAGE)
     proc = subprocess.run(
         [binary, "beat", "-T", "seconds", str(path)],
         capture_output=True, text=True)

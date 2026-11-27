@@ -81,12 +81,20 @@ class TestDetectBeats(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             self.bs.detect_beats(self.src, binary=str(fake))
         self.assertIn("boom", str(ctx.exception))
+        # aubio ran and failed: a real error, not "the tool is not installed".
+        self.assertNotIsInstance(ctx.exception, self.bs.AubioMissing)
 
-    def test_missing_binary_raises_naming_aubio(self):
+    def test_missing_binary_raises_a_distinct_aubio_missing(self):
+        # aubio is optional and the slice box ships on, so the caller has to
+        # tell "not installed" (degrade through slice_no_bpm) apart from
+        # "aubio failed" (an error). AubioMissing stays a RuntimeError: that is
+        # the type the CLI and the bridge turn into one clean stderr line.
         with mock.patch.object(self.bs, "aubio_binary", return_value=None):
-            with self.assertRaises(RuntimeError) as ctx:
+            with self.assertRaises(self.bs.AubioMissing) as ctx:
                 self.bs.detect_beats(self.src)
+        self.assertTrue(issubclass(self.bs.AubioMissing, RuntimeError))
         self.assertIn("aubio", str(ctx.exception))
+        self.assertIn("aubio-tools", str(ctx.exception))
 
 
 class TestChooseBounds(unittest.TestCase):

@@ -9,10 +9,18 @@ You need:
   - Google Chrome, Brave, or Chromium (any of them, already working)
   - Python 3.9 or newer        check with: python3 --version
   - ffmpeg                     check with: ffmpeg -version
+  - aubio                      check with: which aubio   (for beat slicing)
 
 If one of those is missing on Ubuntu or Debian:
 
   sudo apt install python3 ffmpeg
+
+aubio is the one optional item, and it comes from its own package. It measures
+a sample's beats for the beat-slice setting, which ships on. Without aubio the
+tool still works: every sample is delivered uncut, with a warning that names
+the package. The installer prints whether it found aubio.
+
+  sudo apt install aubio-tools
 
 Step 1 - get the folder
 -----------------------

@@ -96,6 +96,12 @@ slice the wrong audio.
 
 - aubio is invoked as a subprocess for detection only (beat positions in
   samples). It never writes the sample.
+- A missing aubio is not a build failure. The box ships on, so a machine
+  without this optional tool would otherwise fail every build: `detect_beats`
+  raises its own `AubioMissing` type and the tool routes it through the
+  `slice_no_bpm` policy, with a message that names the package. aubio that is
+  present but fails stays a plain error. `install.sh`, the README and INSTALL
+  name aubio as the one optional dependency so nobody is surprised.
 - ffmpeg re-slices the finished segment at the chosen first/last beat (with the
   pad applied when padded), then wav_builder rewrites the header as it already
   does after every cut.

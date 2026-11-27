@@ -1784,6 +1784,36 @@ class TestBeatSliceOrchestration(CardFixture):
         with mock.patch.dict(os.environ, {"PATH": path}):
             yield
 
+    @contextlib.contextmanager
+    def no_aubio(self):
+        """A PATH holding every real tool except aubio, so ``which`` really fails.
+
+        Nothing is patched: the shipped lookup runs against a directory with no
+        aubio in it while ffmpeg is still found, so the degraded path is proven
+        on the delivered sample rather than on a stub.
+        """
+        bindir = self.root / "nobin"
+        bindir.mkdir(exist_ok=True)
+        for entry in os.environ["PATH"].split(os.pathsep):
+            if not entry:
+                continue
+            try:
+                names = os.listdir(entry)
+            except OSError:
+                continue
+            for name in names:
+                if name.startswith("aubio"):
+                    continue
+                target = os.path.join(entry, name)
+                link = bindir / name
+                if link.exists() or not os.path.isfile(target):
+                    continue
+                if not os.access(target, os.X_OK):
+                    continue
+                link.symlink_to(target)
+        with mock.patch.dict(os.environ, {"PATH": bindir.as_posix()}):
+            yield
+
     def build(self, source, **settings):
         with self.settings(**settings):
             return sample_tool.build_sample(
@@ -1816,6 +1846,40 @@ class TestBeatSliceOrchestration(CardFixture):
         self.assertIsNone(result.as_dict()["warning"])
         self.assertAlmostEqual(sample_tool.wav_seconds(result.segment_path), 1.0,
                                delta=0.02, msg="skip must send the uncut sample")
+
+    def test_aubio_absent_warn_delivers_uncut_and_names_the_package(self):
+        # The box ships on, so a machine without aubio must not fail every
+        # build: nothing can be measured, so the no-BPM policy decides, and the
+        # message still says what to install.
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=1))
+        with self.no_aubio():
+            result = self.build(source, slice_to_beat=True, slice_no_bpm="warn")
+        self.assertTrue(result.installed)
+        self.assertEqual(result.as_dict()["warning"],
+                         sample_tool.bs.AUBIO_MISSING_MESSAGE)
+        self.assertAlmostEqual(sample_tool.wav_seconds(result.segment_path), 1.0,
+                               delta=0.02,
+                               msg="no aubio must send the uncut sample")
+
+    def test_aubio_absent_block_refuses_the_send(self):
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=1))
+        with self.no_aubio():
+            with self.assertRaises(RuntimeError) as caught:
+                self.build(source, slice_to_beat=True, slice_no_bpm="block")
+        self.assertIn("aubio-tools", str(caught.exception))
+
+    def test_aubio_absent_skip_leaves_the_sample_alone_and_says_nothing(self):
+        source = self.root / "source.wav"
+        source.write_bytes(wav(1, seconds=1))
+        with self.no_aubio():
+            result = self.build(source, slice_to_beat=True, slice_no_bpm="skip")
+        self.assertTrue(result.installed)
+        self.assertIsNone(result.as_dict()["warning"])
+        self.assertAlmostEqual(sample_tool.wav_seconds(result.segment_path), 1.0,
+                               delta=0.02,
+                               msg="skip must send the uncut sample")
 
     def test_beats_hard_cut_the_delivered_sample_between_first_and_last(self):
         # Four beats inside the one-second slice: the hard cut keeps
