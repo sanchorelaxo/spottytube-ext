@@ -455,10 +455,10 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 298 python tests
+    python3 -m unittest discover -s tests -t . -v       # 315 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 78 widget tests
+                tests/test_widget_wiring.mjs            # 80 widget tests
 
 `-t .` matters: without it the modules import top-level and `tests/__init__.py`
 never runs, so the suite reads your real settings file instead of the pinned
@@ -475,6 +475,15 @@ temp path. Test modules import as `tests.test_x` on purpose.
   following the filter graph's clock origin (a taper left on a 0-based clock
   under an accurate seek zeroes the whole cut). The real-ffmpeg behaviour of
   these filters lives in `tests/test_sample_tool.py`.
+- `tests/test_beat_slice.py` — 11 tests: the beat-slicing seam
+  (`tools/beat_slice.py`). The parser and the bounds arithmetic are pure, so
+  a stdout line read whole (never whitespace-split, or the `bpm: 120` line
+  becomes a phantom beat), an under-4-beat or under-0.5 s span that must be
+  refused, and the hard/padded padding arithmetic all fail here. Detection
+  runs the shipped `detect_beats` against a fake `aubio` scripted on `PATH`,
+  and one test runs the shipped `reslice` through real ffmpeg and asserts the
+  plain float32 header and the frame count of the cut. `tools/` stays
+  stdlib-only: aubio is shelled out, never imported.
 - `tests/test_rnnoise_models.py` — 4 tests: the bundled rnnoise voices
   (`tools/rnnoise_models.py`). Each voice name resolves to a shipped `.rnnn`
   file under `tools/rnnoise_models/`, the picker offers the empty default
@@ -482,7 +491,7 @@ temp path. Test modules import as `tests.test_x` on purpose.
   is not a bundled name is passed through untouched rather than rewritten.
 - `tests/test_bridge.py` — 45 tests, real HTTP against `tests/stub_tool.py`, so
   nothing downloads or touches a card.
-- `tests/test_settings.py` — 46 tests: every schema field carries hover help
+- `tests/test_settings.py` — 48 tests: every schema field carries hover help
   and its constraints, a missing/corrupt/partial file degrades to defaults per
   key, validation enforces select choices, number ranges and cross-field rules
   (speed envelope, MIDI channels differ, `tool_path` ends in `.py`), saves are
@@ -496,7 +505,7 @@ temp path. Test modules import as `tests.test_x` on purpose.
   scan that walked nothing fails instead of passing forever, plus a tree
   walk that fails on `package.json`, `node_modules/` or a `jsdom` reference
   so the node harness stays plain `node --test`.
-- `tests/test_sample_tool.py` — 114 tests: time parsing, generic source ids,
+- `tests/test_sample_tool.py` — 118 tests: time parsing, generic source ids,
   transport choice, and placement on the tape chain against a real directory
   tree (bump cascades across tapes, append finds the first free slot, only a
   full Y/6 archives to the card root, read-back check, partial tapes), plus
@@ -569,6 +578,7 @@ if the source is audible there, the fault is the cut filters. This is how the
     installers/browsers.sh         native/snap/Flatpak detection, sourced by install.sh
     INSTALL                        step by step guide for a first install
     tools/sample_tool.py           URL + range -> a slot on the instrument
+    tools/beat_slice.py            aubio beat detection + ffmpeg beat re-slice (stdlib only)
     tools/settings.py              settings schema + store, read by bridge and tool
     tools/sk_usb.py                USB transport (raw termios + amidi, stdlib)
     tools/sk_install.py            transport contract + tape-chain placement
