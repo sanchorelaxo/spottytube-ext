@@ -106,9 +106,22 @@ def reslice(src, dst, start, end):
     result is the same WAVE_FORMAT_IEEE_FLOAT bytes every other path produces
     -- the deck never sees a source-header quirk (the aubiocut bug the spec
     rejected).
+
+    The seek bounds are formatted to a fixed six decimals: ``str()`` renders a
+    bound in (0, 1e-4) as ``5e-05``, which ffmpeg rejects as a time value, so a
+    padded first beat a hair above its pad would crash the build. The rate and
+    channel count are pinned to the builder's, matching every other ffmpeg call
+    here, so the header can never mislabel the PCM. A nonzero exit raises
+    ``RuntimeError`` (not ``CalledProcessError``) so the CLI's existing
+    ``except (ValueError, RuntimeError)`` shows one clean line.
     """
     result = subprocess.run(
-        [wb.ffmpeg(), "-y", "-ss", str(start), "-to", str(end),
-         "-i", str(src), "-f", "f32le", "-"],
-        capture_output=True, check=True)
+        [wb.ffmpeg(), "-y", "-ss", f"{start:.6f}", "-to", f"{end:.6f}",
+         "-i", str(src), "-f", "f32le",
+         "-acodec", "pcm_f32le", "-ar", str(wb.SAMPLE_RATE),
+         "-ac", str(wb.CHANNELS), "-"],
+        capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed: {result.stderr.decode(errors='replace').strip()}")
     wb._write_plain_float_wav(dst, result.stdout, wb.SAMPLE_RATE, wb.CHANNELS)

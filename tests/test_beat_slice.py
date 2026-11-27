@@ -143,6 +143,29 @@ class TestReslice(unittest.TestCase):
         pcm = out.read_bytes()[44:]
         self.assertEqual(len(pcm), round(0.5 * 48000) * 4 * 2)
 
+    def test_reslice_handles_a_start_just_above_zero(self):
+        # A padded first beat a hair above its pad lands the seek bound in
+        # (0, 1e-4), where str(float) renders scientific notation ("5e-05")
+        # and ffmpeg rejects the time value. The cut must still happen.
+        src = self.root / "src.WAV"
+        src.write_bytes(wav(1, seconds=1.0))
+        out = src.with_suffix(".beat.WAV")
+        self.bs.reslice(src, out, 0.00005, 0.5)
+        header = out.read_bytes()[:44]
+        self.assertEqual(int.from_bytes(header[20:22], "little"), 3)
+        self.assertEqual(int.from_bytes(header[24:28], "little"), 48000)
+        pcm = out.read_bytes()[44:]
+        self.assertGreater(len(pcm), 0)
+        self.assertEqual(len(pcm) % 8, 0)          # whole stereo f32 frames
+
+    def test_reslice_failure_raises_runtime_error(self):
+        # The CLI/bridge error contract is RuntimeError -> one clean line on
+        # stderr; CalledProcessError would escape main's except clause and
+        # surface a raw traceback instead.
+        out = self.root / "out.WAV"
+        with self.assertRaises(RuntimeError):
+            self.bs.reslice(self.root / "missing.WAV", out, 0.0, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -455,7 +455,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
 
 ## Tests
 
-    python3 -m unittest discover -s tests -t . -v       # 315 python tests
+    python3 -m unittest discover -s tests -t . -v       # 317 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
                 tests/test_widget_wiring.mjs            # 80 widget tests
@@ -475,14 +475,17 @@ temp path. Test modules import as `tests.test_x` on purpose.
   following the filter graph's clock origin (a taper left on a 0-based clock
   under an accurate seek zeroes the whole cut). The real-ffmpeg behaviour of
   these filters lives in `tests/test_sample_tool.py`.
-- `tests/test_beat_slice.py` — 11 tests: the beat-slicing seam
+- `tests/test_beat_slice.py` — 13 tests: the beat-slicing seam
   (`tools/beat_slice.py`). The parser and the bounds arithmetic are pure, so
   a stdout line read whole (never whitespace-split, or the `bpm: 120` line
   becomes a phantom beat), an under-4-beat or under-0.5 s span that must be
   refused, and the hard/padded padding arithmetic all fail here. Detection
   runs the shipped `detect_beats` against a fake `aubio` scripted on `PATH`,
-  and one test runs the shipped `reslice` through real ffmpeg and asserts the
-  plain float32 header and the frame count of the cut. `tools/` stays
+  and two tests run the shipped `reslice` through real ffmpeg: the span cut
+  asserting the plain float32 header and frame count, and a seek bound just
+  above zero (where `str()` would emit scientific notation ffmpeg rejects).
+  A third pins that a failed cut raises `RuntimeError`, not
+  `CalledProcessError`, so the CLI shows one clean line. `tools/` stays
   stdlib-only: aubio is shelled out, never imported.
 - `tests/test_rnnoise_models.py` — 4 tests: the bundled rnnoise voices
   (`tools/rnnoise_models.py`). Each voice name resolves to a shipped `.rnnn`
