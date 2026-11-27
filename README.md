@@ -373,11 +373,11 @@ to 3 kHz, the band a voice lives in.
   usable BPM: fewer than four beats, or a first-to-last beat span under half
   a second. `skip` sends the sample uncut with no message; `warn` sends it
   uncut and shows "No BPM found, cannot reslice"; `block` refuses to send it.
-  Used when `slice_to_beat` is on.
+  Used when `slice_to_beat` is on, and its row is greyed out until then.
 - `slice_boundary` (`hard`) — how the beat-derived cut meets the sample's own
   edges. `hard` starts on the first beat and ends on the last; `padded` keeps
   the lead-in and tail set below so the loop breathes. Used when
-  `slice_to_beat` is on.
+  `slice_to_beat` is on, and its row is greyed out until then.
 - `slice_pad_ms` (`5`) — milliseconds of lead-in and matching tail kept beyond
   the first and last beat for a `padded` cut, clamped to the file. Raise it
   for a looser loop, lower it for a tighter one. Used when `slice_to_beat` is
@@ -458,7 +458,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
     python3 -m unittest discover -s tests -t . -v       # 317 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 80 widget tests
+                tests/test_widget_wiring.mjs            # 81 widget tests
 
 `-t .` matters: without it the modules import top-level and `tests/__init__.py`
 never runs, so the suite reads your real settings file instead of the pinned

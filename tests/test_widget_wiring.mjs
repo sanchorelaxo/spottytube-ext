@@ -376,6 +376,62 @@ test("the voice picker is live only while arnndn is selected", () => {
   assert.match(src, /pick\(\)/);
 });
 
+// The two behaviour pickers only mean something while the slice box is ticked,
+// so they are live only then. This runs the shipped body against stub inputs
+// and asserts BOTH states: a token grep would pass with the comparison
+// inverted, and the rows would then grey exactly when they do matter.
+test("the slice pickers are live only while slice_to_beat is ticked", () => {
+  const src = extract("syncSliceDeps");
+  // Wired into the render, or the greying never runs at all.
+  assert.match(extract("renderFields"), /syncSliceDeps\(\)/);
+  // The two rows the brief names, and only those.
+  assert.match(src, /"slice_no_bpm"/);
+  assert.match(src, /"slice_boundary"/);
+  assert.doesNotMatch(src, /"slice_pad_ms"/);
+  // A disabled control must look disabled: the row's own background and colour
+  // override Brave's default grey, so the state needs a rule of its own.
+  assert.match(content, /\.srow (select|input):disabled/);
+
+  const watch = (value) => ({
+    value, checked: false, disabled: false, listeners: {},
+    addEventListener(type, fn) { this.listeners[type] = fn; }
+  });
+  const box = watch("");
+  const noBpm = watch("warn");
+  const boundary = watch("hard");
+  const inputs = new Map([
+    ["slice_to_beat", box],
+    ["slice_no_bpm", noBpm],
+    ["slice_boundary", boundary]
+  ]);
+  const sync = new Function(
+    "settingsState",
+    extract("syncSliceDeps") + "\nreturn syncSliceDeps;"
+  )({ inputs });
+
+  sync();                                    // unticked, as the panel first paints
+  assert.equal(noBpm.disabled, true, "the no-BPM picker is dead while the slice box is off");
+  assert.equal(boundary.disabled, true, "the boundary picker is dead while the slice box is off");
+
+  box.checked = true;
+  box.listeners.change();                    // the event the panel would fire
+  assert.equal(noBpm.disabled, false, "ticking the slice box must wake the row up");
+  assert.equal(boundary.disabled, false, "ticking the slice box must wake the row up");
+
+  box.checked = false;
+  box.listeners.change();
+  assert.equal(noBpm.disabled, true, "unticking must grey the row again");
+  assert.equal(boundary.disabled, true, "unticking must grey the row again");
+
+  // A greyed row is not a reset one: the choice survives for when it is live.
+  assert.equal(noBpm.value, "warn");
+  assert.equal(boundary.value, "hard");
+
+  // An older bridge sends no beat-slice rows at all: this must not throw.
+  inputs.delete("slice_to_beat");
+  assert.doesNotThrow(() => sync());
+});
+
 test("the speech shortcut sets the band, never posts itself", () => {
   const src = extract("installSpeechPreset");
   assert.match(src, /highpass_hz/);

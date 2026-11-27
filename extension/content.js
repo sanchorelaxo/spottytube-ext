@@ -217,6 +217,9 @@
         padding: 4px 6px; box-sizing: border-box; width: 100%;
       }
       .srow select:focus, .srow input:focus { outline: none; border-color: #f5c451; }
+      /* A greyed row must look greyed. The row's own background and colour beat
+         Brave's default disabled style, so the state needs a rule of its own. */
+      .srow select:disabled, .srow input:disabled { opacity: .45; cursor: default; }
       .srow input[type="checkbox"] {
         justify-self: start; width: 16px; height: 16px; accent-color: #3ecf8e; cursor: pointer;
       }
@@ -737,6 +740,7 @@
         if (section.key === "advanced") installSpeechPreset(host);
       });
       syncModelPicker();
+      syncSliceDeps();
     }
     clampIntoView(el.settings);   // content height changed: keep the footer reachable
   }
@@ -766,6 +770,23 @@
     if (!method || !model) return;
     const pick = () => { model.disabled = method.value !== "arnndn"; };
     method.addEventListener("change", pick);
+    pick();
+  }
+
+  // The no-BPM and boundary pickers only describe what the slice box does, so
+  // they are live only while it is ticked. Same deal as the voice picker: the
+  // values are left alone, so the choice is still there when the box comes
+  // back on instead of being reset to the schema default.
+  function syncSliceDeps() {
+    const box = settingsState.inputs.get("slice_to_beat");
+    if (!box) return;   // an older bridge sends no beat-slice rows at all
+    const deps = ["slice_no_bpm", "slice_boundary"]
+      .map((key) => settingsState.inputs.get(key))
+      .filter(Boolean);
+    const pick = () => {
+      deps.forEach((input) => { input.disabled = !box.checked; });
+    };
+    box.addEventListener("change", pick);
     pick();
   }
 
