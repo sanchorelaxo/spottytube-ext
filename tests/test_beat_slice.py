@@ -18,6 +18,8 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 TOOLS = HERE.parent / "tools"
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))  # beat_slice imports wav_builder flat
 
 
 def _load(name, filename=None):
@@ -29,6 +31,9 @@ def _load(name, filename=None):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+from tests.test_sample_tool import wav  # noqa: E402  (shared float-WAV fixture)
 
 
 class TestParseBeats(unittest.TestCase):
@@ -82,6 +87,61 @@ class TestDetectBeats(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 self.bs.detect_beats(self.src)
         self.assertIn("aubio", str(ctx.exception))
+
+
+class TestChooseBounds(unittest.TestCase):
+    """The pure bounds picker: floor checks, hard vs padded, clamped edges."""
+
+    def setUp(self):
+        self.bs = _load("beat_slice")
+
+    def test_under_four_beats_returns_none(self):
+        self.assertIsNone(self.bs.choose_bounds([0.0, 1.0, 2.0], "hard", 0, 10.0))
+
+    def test_span_under_half_second_returns_none(self):
+        # 4 beats but squashed into 0.4 s
+        self.assertIsNone(
+            self.bs.choose_bounds([0.0, 0.1, 0.2, 0.4], "hard", 0, 10.0))
+
+    def test_hard_cut_is_first_to_last_beat(self):
+        self.assertEqual(
+            self.bs.choose_bounds([0.5, 1.0, 1.5, 2.0], "hard", 0, 10.0),
+            (0.5, 2.0))
+
+    def test_padded_keeps_lead_in_and_tail(self):
+        self.assertEqual(
+            self.bs.choose_bounds([0.5, 1.0, 1.5, 2.0], "padded", 25, 10.0),
+            (0.475, 2.025))
+
+    def test_padded_clamps_to_file_bounds(self):
+        self.assertEqual(
+            self.bs.choose_bounds([0.01, 0.5, 1.0, 1.5], "padded", 25, 10.0),
+            (0.0, 1.525))
+
+
+class TestReslice(unittest.TestCase):
+    """re-slice lays the kept span down as a fresh plain-float WAV.
+
+    Real ffmpeg and real wav_builder: the point is that the cut bytes are
+    WAVE_FORMAT_IEEE_FLOAT at the builder's rate, not that a mock was called.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.bs = _load("beat_slice")
+
+    def test_reslice_writes_plain_float_wav_of_requested_span(self):
+        src = self.root / "src.WAV"
+        src.write_bytes(wav(1, seconds=1.0))
+        out = src.with_suffix(".beat.WAV")
+        self.bs.reslice(src, out, 0.25, 0.75)
+        header = out.read_bytes()[:44]
+        # fmt tag 3 = WAVE_FORMAT_IEEE_FLOAT, stereo 48k, from wav_builder.
+        self.assertEqual(int.from_bytes(header[20:22], "little"), 3)
+        self.assertEqual(int.from_bytes(header[24:28], "little"), 48000)
+        pcm = out.read_bytes()[44:]
+        self.assertEqual(len(pcm), round(0.5 * 48000) * 4 * 2)
 
 
 if __name__ == "__main__":

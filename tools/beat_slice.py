@@ -15,6 +15,18 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import wav_builder as wb
+
+
+# Safety floors (spec "Safety floors"): a sample with too few beats, or a
+# first-to-last-beat span too short to be a loop, is "no BPM found" and routes
+# through the slice_no_bpm policy rather than installing a sliver.
+MIN_BEATS = 4
+MIN_SPAN_SECONDS = 0.5
+
+# The exact string the warn path surfaces (spec "Delivery", global constraint).
+NO_BPM_MESSAGE = "No BPM found, cannot reslice"
+
 
 def aubio_binary():
     """The ``aubio`` CLI on PATH, or ``None`` when it is absent.
@@ -65,3 +77,38 @@ def detect_beats(path, binary=None):
     if proc.returncode != 0:
         raise RuntimeError(f"aubio failed: {proc.stderr.strip()}")
     return parse_beats(proc.stdout)
+
+
+def choose_bounds(beats, boundary, pad_ms, total_seconds):
+    """``(start, end)`` seconds to keep, or ``None`` for "no BPM found".
+
+    ``None`` when fewer than :data:`MIN_BEATS` beats were detected, or when
+    the first-to-last-beat span is under :data:`MIN_SPAN_SECONDS` -- the span
+    is measured before padding, so padding can never rescue a sliver. A
+    ``"padded"`` boundary keeps ``pad_ms`` of lead-in and a matching tail,
+    clamped to ``[0.0, total_seconds]`` so the cut never seeks before the file
+    start.
+    """
+    if len(beats) < MIN_BEATS:
+        return None
+    if beats[-1] - beats[0] < MIN_SPAN_SECONDS:
+        return None
+    pad = pad_ms / 1000.0 if boundary == "padded" else 0.0
+    start = max(0.0, beats[0] - pad)
+    end = min(total_seconds, beats[-1] + pad)
+    return (start, end)
+
+
+def reslice(src, dst, start, end):
+    """Re-cut ``src`` to ``[start, end)`` as a fresh plain-float WAV at ``dst``.
+
+    ffmpeg decodes and trims to raw f32; wav_builder writes the header, so the
+    result is the same WAVE_FORMAT_IEEE_FLOAT bytes every other path produces
+    -- the deck never sees a source-header quirk (the aubiocut bug the spec
+    rejected).
+    """
+    result = subprocess.run(
+        [wb.ffmpeg(), "-y", "-ss", str(start), "-to", str(end),
+         "-i", str(src), "-f", "f32le", "-"],
+        capture_output=True, check=True)
+    wb._write_plain_float_wav(dst, result.stdout, wb.SAMPLE_RATE, wb.CHANNELS)
