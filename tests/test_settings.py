@@ -346,10 +346,11 @@ class TestAdvancedSection(TempSettingsCase):
         "slice_boundary": "hard", "slice_pad_ms": 5,
     }
 
-    def test_advanced_sits_right_after_audio(self):
+    def test_advanced_is_the_last_section(self):
         names = [key for key, _ in st.SECTIONS]
         self.assertIn("advanced", names)
-        self.assertEqual(names[names.index("audio") + 1], "advanced")
+        self.assertEqual(names[-1], "advanced",
+                         "Advanced must be the bottom section in the panel")
 
     def test_the_section_holds_exactly_the_spec_keys(self):
         actual = [field["key"] for field in st.SCHEMA if field["section"] == "advanced"]

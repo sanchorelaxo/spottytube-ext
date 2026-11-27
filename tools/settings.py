@@ -33,11 +33,11 @@ import rnnoise_models
 # Panel order in the GUI.
 SECTIONS = (
     ("audio", "Audio pipeline"),
-    ("advanced", "Advanced"),
     ("defaults", "Save defaults"),
     ("device", "Device (config.txt)"),
     ("widget", "Widget"),
     ("bridge", "Bridge and paths"),
+    ("advanced", "Advanced"),
 )
 
 # Presentation hints per section. SECTIONS stays plain (key, label) pairs so
