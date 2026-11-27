@@ -57,7 +57,9 @@ reason the subprocess path is preferred over an in-process import.
 
 ### Settings (four fields, all `"section": "advanced"`, `"scope": "tool"`)
 
-1. `slice_to_beat` — checkbox, default off. Label "Slice to auto-detected BPM
+1. `slice_to_beat` — checkbox, default **on** (changed after first use: the
+   operator wants every sample on the grid, so the shipped default is on and the
+   plan's `default False` is superseded). Label "Slice to auto-detected BPM
    (if any)". The master switch; every field below is ignored when it is off.
 
 2. `slice_no_bpm` — select, default "warn". Only meaningful when slice_to_beat

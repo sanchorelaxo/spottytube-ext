@@ -491,12 +491,13 @@ SCHEMA = [
     {
         "key": "slice_to_beat", "section": "advanced", "scope": "tool",
         "label": "Slice to auto-detected BPM (if any)", "control": "checkbox",
-        "default": False,
+        "default": True,
         "help": "Trim the finished sample to its first and last detected beat so "
                 "a loop lands on the grid. The tool runs aubio's beat tracker "
                 "over the cut last, after the re-time and the final filters, so "
-                "a speed change cannot move the beats. Off by default: it costs "
-                "one extra aubio pass.",
+                "a speed change cannot move the beats. On by default: it costs "
+                "one extra aubio pass per sample, and a sample with no clear "
+                "pulse is sent uncut.",
     },
     {
         "key": "slice_no_bpm", "section": "advanced", "scope": "tool",

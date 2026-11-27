@@ -342,7 +342,7 @@ class TestAdvancedSection(TempSettingsCase):
         "resampler": "swr", "dither": "none",
         "trim_silence": False, "trim_threshold_db": -50,
         "noise_reduction": False, "nr_method": "afftdn", "nr_model": "",
-        "slice_to_beat": False, "slice_no_bpm": "warn",
+        "slice_to_beat": True, "slice_no_bpm": "warn",
         "slice_boundary": "hard", "slice_pad_ms": 5,
     }
 
@@ -364,12 +364,17 @@ class TestAdvancedSection(TempSettingsCase):
             with self.subTest(key=key):
                 self.assertEqual(st.defaults()[key], expected)
 
-    def test_only_the_declick_fade_is_on_by_default(self):
-        """D1: every other new setting must leave today's output untouched."""
+    def test_slice_to_beat_is_the_only_advanced_box_on_by_default(self):
+        """D1 is reversed for this one key on the operator's call.
+
+        The feature is wanted on every sample, so it ships on: the whole list is
+        asserted, not just the key, because the other advanced boxes must still
+        leave today's output untouched.
+        """
         on = [key for key, field in st.FIELDS.items()
               if field["section"] == "advanced"
               and field["control"] == "checkbox" and st.defaults()[key]]
-        self.assertEqual(on, [])
+        self.assertEqual(on, ["slice_to_beat"])
         self.assertEqual(st.defaults()["edge_fade"], "declick")
 
     def test_selects_carry_their_choices(self):
@@ -451,7 +456,7 @@ class TestBeatSliceSchema(TempSettingsCase):
     KEYS = ("slice_to_beat", "slice_no_bpm", "slice_boundary", "slice_pad_ms")
 
     def test_slice_fields_have_defaults_choices_and_tool_scope(self):
-        self.assertEqual(st.FIELDS["slice_to_beat"]["default"], False)
+        self.assertEqual(st.FIELDS["slice_to_beat"]["default"], True)
         self.assertEqual(st.FIELDS["slice_no_bpm"]["default"], "warn")
         self.assertEqual(st.FIELDS["slice_boundary"]["default"], "hard")
         self.assertEqual(st.FIELDS["slice_pad_ms"]["default"], 5)

@@ -364,11 +364,12 @@ to 3 kHz, the band a voice lives in.
   hand-edited into the file that is not a bundled name never reaches the
   panel, because the load falls back per key and drops it to the empty
   default.
-- `slice_to_beat` (`off`) — trim the finished sample to its first and last
+- `slice_to_beat` (`on`) — trim the finished sample to its first and last
   detected beat so a loop lands on the grid. The tool runs aubio's beat
   tracker over the cut last, after the re-time and the final filters, so a
-  speed change cannot move the beats. Off by default: it costs one extra
-  aubio pass.
+  speed change cannot move the beats. On by default: it costs one extra
+  aubio pass per sample, and a sample with no clear pulse is sent uncut (see
+  `slice_no_bpm`).
 - `slice_no_bpm` (`warn`) — what happens when the beat tracker finds no
   usable BPM: fewer than four beats, or a first-to-last beat span under half
   a second. `skip` sends the sample uncut with no message; `warn` sends it
