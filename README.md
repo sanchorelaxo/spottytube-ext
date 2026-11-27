@@ -381,7 +381,8 @@ to 3 kHz, the band a voice lives in.
 - `slice_pad_ms` (`5`) — milliseconds of lead-in and matching tail kept beyond
   the first and last beat for a `padded` cut, clamped to the file. Raise it
   for a looser loop, lower it for a tighter one. Used when `slice_to_beat` is
-  on and `slice_boundary` is `padded`.
+  on and `slice_boundary` is `padded`; the row stays greyed out until both
+  hold.
 
 **Match `loudnorm_tp` and `true_peak_dbtp`.** Loudnorm drives toward its own TP
 (default `-1.5`) and the limiter caps at `true_peak_dbtp` (default `-1.0`). Two
@@ -458,7 +459,7 @@ Bound to 127.0.0.1 only. Cross-origin reads are allowed only from
     python3 -m unittest discover -s tests -t . -v       # 317 python tests
     node --test tests/test_selection.mjs \
                 tests/test_speed.mjs \
-                tests/test_widget_wiring.mjs            # 81 widget tests
+                tests/test_widget_wiring.mjs            # 82 widget tests
 
 `-t .` matters: without it the modules import top-level and `tests/__init__.py`
 never runs, so the suite reads your real settings file instead of the pinned

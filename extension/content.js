@@ -774,19 +774,30 @@
   }
 
   // The no-BPM and boundary pickers only describe what the slice box does, so
-  // they are live only while it is ticked. Same deal as the voice picker: the
-  // values are left alone, so the choice is still there when the box comes
-  // back on instead of being reset to the schema default.
+  // they are live only while it is ticked, and the pad box sits one step
+  // further in: it only describes a padded boundary. Same deal as the voice
+  // picker: the values are left alone, so each choice is still there when its
+  // row comes back on instead of being reset to the schema default.
   function syncSliceDeps() {
     const box = settingsState.inputs.get("slice_to_beat");
     if (!box) return;   // an older bridge sends no beat-slice rows at all
-    const deps = ["slice_no_bpm", "slice_boundary"]
-      .map((key) => settingsState.inputs.get(key))
-      .filter(Boolean);
+    const noBpm = settingsState.inputs.get("slice_no_bpm");
+    const boundary = settingsState.inputs.get("slice_boundary");
+    const pad = settingsState.inputs.get("slice_pad_ms");
     const pick = () => {
-      deps.forEach((input) => { input.disabled = !box.checked; });
+      const on = box.checked;
+      if (noBpm) noBpm.disabled = !on;
+      if (boundary) boundary.disabled = !on;
+      // The pad is live only while it would actually reach the cut: a padded
+      // boundary under a ticked box. Asking for a padded boundary with the
+      // slice off leaves the whole chain dark, rather than one live row that
+      // changes nothing.
+      if (pad) pad.disabled = !(on && boundary && boundary.value === "padded");
     };
     box.addEventListener("change", pick);
+    // The boundary picker can move while the panel is open, and the pad's
+    // liveness depends on it, so it needs its own listener.
+    if (boundary) boundary.addEventListener("change", pick);
     pick();
   }
 

@@ -384,10 +384,9 @@ test("the slice pickers are live only while slice_to_beat is ticked", () => {
   const src = extract("syncSliceDeps");
   // Wired into the render, or the greying never runs at all.
   assert.match(extract("renderFields"), /syncSliceDeps\(\)/);
-  // The two rows the brief names, and only those.
+  // Both behaviour rows, by name: a rename in the schema must break this.
   assert.match(src, /"slice_no_bpm"/);
   assert.match(src, /"slice_boundary"/);
-  assert.doesNotMatch(src, /"slice_pad_ms"/);
   // A disabled control must look disabled: the row's own background and colour
   // override Brave's default grey, so the state needs a rule of its own.
   assert.match(content, /\.srow (select|input):disabled/);
@@ -429,6 +428,62 @@ test("the slice pickers are live only while slice_to_beat is ticked", () => {
 
   // An older bridge sends no beat-slice rows at all: this must not throw.
   inputs.delete("slice_to_beat");
+  assert.doesNotThrow(() => sync());
+});
+
+// The pad box is one step further in: it only describes a padded boundary, and
+// the boundary row is itself dead while the slice box is unticked, so pad is
+// live only when both hold. Asserting both directions here too, and both
+// listeners: a boundary change while the panel is open must re-grey the pad
+// box, not leave it stale until the panel is reopened.
+test("the pad box is live only for a padded boundary under a ticked slice box", () => {
+  const src = extract("syncSliceDeps");
+  assert.match(src, /"slice_pad_ms"/);
+  assert.match(src, /boundary\.addEventListener\("change"/);
+
+  const watch = (value) => ({
+    value, checked: true, disabled: false, listeners: {},
+    addEventListener(type, fn) { this.listeners[type] = fn; }
+  });
+  const box = watch("");
+  const boundary = watch("hard");
+  const pad = watch("5");
+  const inputs = new Map([
+    ["slice_to_beat", box],
+    ["slice_boundary", boundary],
+    ["slice_pad_ms", pad]
+  ]);
+  const sync = new Function(
+    "settingsState",
+    extract("syncSliceDeps") + "\nreturn syncSliceDeps;"
+  )({ inputs });
+
+  sync();
+  assert.equal(pad.disabled, true, "a hard boundary takes no pad, so the box is dead");
+
+  boundary.value = "padded";
+  boundary.listeners.change();
+  assert.equal(pad.disabled, false, "a padded boundary is exactly when the pad matters");
+
+  boundary.value = "hard";
+  boundary.listeners.change();
+  assert.equal(pad.disabled, true, "back to hard, back to grey");
+
+  // The parent is still the gate: unticking the slice box kills the whole
+  // chain, even with the boundary stored as padded.
+  boundary.value = "padded";
+  box.checked = false;
+  box.listeners.change();
+  assert.equal(pad.disabled, true, "the slice box is off, so nothing downstream is live");
+
+  box.checked = true;
+  box.listeners.change();
+  assert.equal(pad.disabled, false, "ticking the box back wakes the pad row up");
+  assert.equal(pad.value, "5", "a greyed row keeps its value");
+
+  // A bridge that sends no beat-slice rows beyond the box must not throw.
+  inputs.delete("slice_boundary");
+  inputs.delete("slice_pad_ms");
   assert.doesNotThrow(() => sync());
 });
 
