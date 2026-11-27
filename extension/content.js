@@ -1062,12 +1062,17 @@
       if (job.status === "done" && job.result) {
         const r = job.result;
         const at = r.speed && r.speed !== 1 ? ` @ ${Number(r.speed).toFixed(2)}x` : "";
+        // A beat-slice that found no BPM still ships, so say so under the
+        // success line rather than swallowing it. A ``block`` policy never
+        // reaches here: the tool exits nonzero and the error branch below
+        // already shows its stderr tail.
+        const warn = r.warning ? `\n${r.warning}` : "";
         // Show where the sample lives ON THE UNIT — its tape directory and
         // slot — not the generated segment file on this machine.
         setStatus(`saved \u2192 ${r.tape}/${r.slot}.WAV \u00b7 ` +
                   `${Math.round(r.end - r.start)}s${at}\n` +
                   `${r.mode === "append" ? "appended to the first free slot" : "bumped into slot 1"}` +
-                  ` \u00b7 via ${r.transport}`, "ok");
+                  ` \u00b7 via ${r.transport}` + warn, "ok");
         return true;
       }
       const detail = (job.stderr || job.stdout || "sampling tool failed").trim();

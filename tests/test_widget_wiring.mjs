@@ -449,3 +449,52 @@ test("a successful save leaves the panel like cancelling does", () => {
   // A written card says so on the status line.
   assert.match(src, /config\.txt written/);
 });
+
+// A beat-slice that finds no BPM still ships. The tool exits zero and carries
+// the wording back in job.result.warning, so the widget must say it under the
+// success line. Both cases run the SHIPPED pollJob body against stub bridge
+// replies; strip the warn branch and the warning test fails.
+function runPollJob(result) {
+  const calls = [];
+  // pollJob is async; extract() drops the keyword, so put it back or the
+  // Function body throws a SyntaxError on its first await.
+  const pollJob = new Function(
+    "ask", "sleep", "setStatus", "showOffline", "POLL_LIMIT_MS", "POLL_MS",
+    "async " + extract("pollJob") + "\nreturn pollJob;"
+  )(
+    async () => ({ status: "done", result }),
+    async () => {},
+    (text, kind) => calls.push({ text, kind }),
+    () => {},
+    1000,
+    0
+  );
+  return pollJob("job-1").then((done) => ({ done, calls }));
+}
+
+test("a done job with a warning surfaces it under the success line", async () => {
+  const { done, calls } = await runPollJob({
+    tape: "B", slot: 1, start: 0, end: 8, speed: 1, mode: "bump",
+    transport: "card", warning: "No BPM found, cannot reslice"
+  });
+  assert.equal(done, true);
+  assert.ok(calls.length > 0, "the done branch must write a status");
+  const last = calls[calls.length - 1];
+  assert.match(last.text, /saved \u2192 B\/1\.WAV/, "the success line must survive");
+  assert.ok(last.text.includes("No BPM found, cannot reslice"),
+    `the warning must be shown: ${JSON.stringify(last.text)}`);
+  assert.equal(last.kind, "ok");
+});
+
+test("a done job with no warning walks the unchanged success path", async () => {
+  const { done, calls } = await runPollJob({
+    tape: "B", slot: 2, start: 0, end: 8, speed: 1, mode: "append",
+    transport: "card"
+  });
+  assert.equal(done, true);
+  const last = calls[calls.length - 1];
+  assert.match(last.text, /saved \u2192 B\/2\.WAV/);
+  assert.doesNotMatch(last.text, /No BPM/);
+  assert.doesNotMatch(last.text, /warning/i);
+  assert.equal(last.kind, "ok");
+});
